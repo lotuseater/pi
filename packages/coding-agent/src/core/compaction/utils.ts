@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText, type Message } from "@earendil-works/pi-ai";
+import { restoreContextResult } from "../context-references.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -144,7 +145,8 @@ export function serializeConversation(messages: Message[]): string {
 				parts.push(`[Assistant tool calls]: ${toolCalls.join("; ")}`);
 			}
 		} else if (msg.role === "toolResult") {
-			const content = contentText(msg.content, "");
+			// Summary truncation can remove a full anchor; summarize original observations.
+			const content = contentText(restoreContextResult(msg).content, "");
 			if (content) {
 				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
 			}

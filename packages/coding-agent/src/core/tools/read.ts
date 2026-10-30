@@ -16,7 +16,7 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
 const readSchema = Type.Object({
 	force: Type.Optional(
 		Type.Boolean({
-			description: "Resend full text instead of a reference to an identical result already in this request",
+			description: "Resend full text instead of a context reference or changed-file delta in this request",
 		}),
 	),
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),

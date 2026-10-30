@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
+import { formatReadSplice } from "./context-read-deltas.ts";
 
 /** Explicit launch-time opt-in; durable messages and default tool schemas stay unchanged. */
 export const CONTEXT_REFERENCES_ENABLED = process.env.PI_CONTEXT_RESULT_REFERENCES === "1";
+/** Separate opt-in until changed-file projections are qualified for the caller. */
+export const CONTEXT_READ_DELTAS_ENABLED = process.env.PI_CONTEXT_READ_DELTAS === "1";
 
 export type ReadOnlySnapshot =
 	| { version: 1; tool: "read" | "grep"; identity: string }
@@ -52,6 +56,20 @@ function canonical(
 	}
 }
 
+/** Restore complete tool text before another layer applies its own truncation. */
+export function restoreContextResult(message: Message): Message {
+	if (message.role !== "toolResult") return message;
+	const details = message.details as { piContextProjection?: { version: number; originalText: string } } | undefined;
+	if (details?.piContextProjection?.version !== 1 || typeof details.piContextProjection.originalText !== "string")
+		return message;
+	const { piContextProjection, ...rest } = details;
+	return {
+		...message,
+		details: rest,
+		content: [{ type: "text" as const, text: piContextProjection.originalText }],
+	};
+}
+
 /**
  * Rebuild from the actual outgoing history on every projection. No file read is
  * skipped. Originals remain in session storage; a first surviving result is full
@@ -59,7 +77,7 @@ function canonical(
  */
 export function referenceReadOnlyResults(
 	messages: Message[],
-	options: { maxEntries?: number; maxBytes?: number; minBytes?: number } = {},
+	options: { maxEntries?: number; maxBytes?: number; minBytes?: number; readDeltas?: boolean } = {},
 ): Message[] {
 	const maxEntries = options.maxEntries ?? 32;
 	const maxBytes = options.maxBytes ?? 1024 * 1024;
@@ -75,24 +93,13 @@ export function referenceReadOnlyResults(
 		return messages;
 	// A caller may project an already projected list. Restore full records first;
 	// even a surviving reference can then become full if its anchor was removed.
-	const originals = messages.map((message) => {
-		if (message.role !== "toolResult") return message;
-		const details = message.details as
-			| { piContextProjection?: { version: number; originalText: string } }
-			| undefined;
-		if (details?.piContextProjection?.version !== 1 || typeof details.piContextProjection.originalText !== "string")
-			return message;
-		const { piContextProjection, ...rest } = details;
-		return {
-			...message,
-			details: rest,
-			content: [{ type: "text" as const, text: piContextProjection.originalText }],
-		};
-	});
+	const originals = messages.map(restoreContextResult);
 	const calls = new Map<string, { name: string; args: Record<string, unknown> }>();
-	const snapshots = new Map<string, number>();
+	const snapshots = new Map<string, { bytes: number; readBase?: { family: string; text: string } }>();
+	const readDeltas = options.readDeltas ?? CONTEXT_READ_DELTAS_ENABLED;
+	let remainingDeltaWork = 512 * 1024;
 	let heldBytes = 0;
-	return originals.map((message) => {
+	return originals.map((message, observation) => {
 		if (message.role === "assistant") {
 			if (message.stopReason === "aborted" || message.stopReason === "error" || message.stopReason === "pending")
 				return message;
@@ -134,9 +141,11 @@ export function referenceReadOnlyResults(
 		delete args.force;
 		let id: string;
 		let entryBytes: number;
+		let readFamily: string | undefined;
 		try {
 			// Bind all material result details, including exact truncation totals/content.
 			const rawDetails = message.details ?? {};
+			if (typeof rawDetails !== "object" || rawDetails === null) return message;
 			const prototype = Object.getPrototypeOf(rawDetails);
 			if (prototype !== Object.prototype && prototype !== null) return message;
 			const material: Record<string, unknown> = Object.create(null);
@@ -154,6 +163,20 @@ export function referenceReadOnlyResults(
 			if (observedResult || Object.keys(material).length > 0)
 				identity.push(canonical(snapshot), canonical(material));
 			id = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+			// Initial delta support is deliberately restricted to complete local files.
+			if (
+				readDeltas &&
+				snapshot.version === 1 &&
+				snapshot.tool === "read" &&
+				isAbsolute(snapshot.identity) &&
+				call.args.offset === undefined &&
+				call.args.limit === undefined &&
+				Object.keys(material).length === 0
+			) {
+				readFamily = createHash("sha256")
+					.update(JSON.stringify([snapshot.identity, canonical(args)]))
+					.digest("hex");
+			}
 		} catch {
 			// Extension-added non-JSON metadata must cause a full-result fallback.
 			return message;
@@ -176,12 +199,35 @@ export function referenceReadOnlyResults(
 				],
 			};
 		}
+		if (readFamily) {
+			// Only entries emitted FULL in this very projection can serve as a base.
+			const base = [...snapshots.entries()].reverse().find(([, entry]) => entry.readBase?.family === readFamily);
+			if (base?.[1].readBase) {
+				const work = Buffer.byteLength(base[1].readBase.text, "utf8") + bytes;
+				if (work <= remainingDeltaWork) {
+					remainingDeltaWork -= work;
+					const delta = formatReadSplice(base[1].readBase.text, text, snapshot.identity, base[0], observation + 1);
+					if (delta)
+						return {
+							...message,
+							details: {
+								...(message.details as object),
+								piContextProjection: { version: 1, originalText: text },
+							},
+							content: [{ type: "text", text: delta }],
+						};
+				}
+			}
+		}
 		while (snapshots.size >= maxEntries || heldBytes + entryBytes > maxBytes) {
 			const oldest = snapshots.keys().next().value!;
-			heldBytes -= snapshots.get(oldest)!;
+			heldBytes -= snapshots.get(oldest)!.bytes;
 			snapshots.delete(oldest);
 		}
-		snapshots.set(id, entryBytes);
+		snapshots.set(id, {
+			bytes: entryBytes,
+			...(readFamily ? { readBase: { family: readFamily, text } } : {}),
+		});
 		heldBytes += entryBytes;
 		return {
 			...message,
