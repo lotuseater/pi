@@ -14,11 +14,17 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const readSchema = Type.Object({
-	...(CONTEXT_REFERENCES_ENABLED ? { force: Type.Optional(Type.Boolean({ description: "Resend full text instead of a reference to an identical result already in this request" })) } : {}),
+	force: Type.Optional(
+		Type.Boolean({
+			description: "Resend full text instead of a reference to an identical result already in this request",
+		}),
+	),
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
 });
+// Keep the optional input type stable while preserving the disabled wire schema.
+if (!CONTEXT_REFERENCES_ENABLED) Reflect.deleteProperty(readSchema.properties, "force");
 
 export const readToolSystemPromptContribution = {
 	snippet: "Read file contents",
@@ -186,7 +192,9 @@ export function createReadToolDefinition(
 									totalFileLines = allLines.length;
 									// Check if offset is out of bounds.
 									if (startLine >= allLines.length) {
-										throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
+										throw new Error(
+											`Offset ${offset} is beyond end of file (${allLines.length} lines total)`,
+										);
 									}
 									let selectedContent: string;
 									// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
@@ -199,7 +207,9 @@ export function createReadToolDefinition(
 									}
 									// Apply truncation, respecting both line and byte limits.
 									truncation = truncateHead(selectedContent);
-									firstLineBytes = truncation.firstLineExceedsLimit ? Buffer.byteLength(allLines[startLine], "utf-8") : 0;
+									firstLineBytes = truncation.firstLineExceedsLimit
+										? Buffer.byteLength(allLines[startLine], "utf-8")
+										: 0;
 								}
 								let outputText: string;
 								if (truncation.firstLineExceedsLimit) {
@@ -230,8 +240,19 @@ export function createReadToolDefinition(
 								content = [{ type: "text", text: outputText }];
 							}
 
-							if (CONTEXT_REFERENCES_ENABLED && !options?.operations && !mimeType && !details?.truncation?.truncated && content.length === 1 && content[0].type === "text" && !content[0].text.includes("\0")) {
-								details = { ...details, piReadOnlySnapshot: { version: 1, tool: "read", identity: absolutePath } };
+							if (
+								CONTEXT_REFERENCES_ENABLED &&
+								!options?.operations &&
+								!mimeType &&
+								!details?.truncation?.truncated &&
+								content.length === 1 &&
+								content[0].type === "text" &&
+								!content[0].text.includes("\0")
+							) {
+								details = {
+									...details,
+									piReadOnlySnapshot: { version: 1, tool: "read", identity: absolutePath },
+								};
 							}
 							if (aborted) return;
 							signal?.removeEventListener("abort", onAbort);

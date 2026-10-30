@@ -1,8 +1,8 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { VERSION } from "../../../config.ts";
-import { CONTEXT_REFERENCES_ENABLED } from "../../../core/context-references.ts";
 import type { AgentSession } from "../../../core/agent-session.ts";
+import { CONTEXT_REFERENCES_ENABLED } from "../../../core/context-references.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ContextUsage } from "../../../core/extensions/types.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
@@ -286,7 +286,11 @@ export class FooterComponent implements Component {
 		const dimRemainder = theme.fg("dim", remainder);
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const customBuild = truncateToWidth(theme.fg("dim", `Pi custom ${VERSION} · refs ${CONTEXT_REFERENCES_ENABLED ? "on" : "off"}`), width, "...");
+		const customBuild = truncateToWidth(
+			theme.fg("dim", `Pi custom ${VERSION} · refs ${CONTEXT_REFERENCES_ENABLED ? "on" : "off"}`),
+			width,
+			"...",
+		);
 		const lines = [customBuild, pwdLine, dimStatsLeft + dimRemainder];
 
 		// Add extension statuses on a single line, sorted by key alphabetically

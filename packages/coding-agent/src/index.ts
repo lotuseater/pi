@@ -10,8 +10,8 @@ export {
 	getExamplesPath,
 	getPackageDir,
 	getReadmePath,
-	VERSION,
 	RUNTIME_IDENTITY,
+	VERSION,
 } from "./config.ts";
 export {
 	AgentSession,

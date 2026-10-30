@@ -585,8 +585,11 @@ export const VERSION: string = pkg.version || "0.0.0";
 export const RUNTIME_IDENTITY = Object.freeze({
 	version: VERSION,
 	custom: VERSION.includes("+local."),
-	sourceRevision: typeof pkg.piEfficiencyStudy?.sourceCommit === "string" && /^[a-f0-9]{40}$/.test(pkg.piEfficiencyStudy.sourceCommit)
-		? pkg.piEfficiencyStudy.sourceCommit : undefined,
+	sourceRevision:
+		typeof pkg.piEfficiencyStudy?.sourceCommit === "string" &&
+		/^[a-f0-9]{40}$/.test(pkg.piEfficiencyStudy.sourceCommit)
+			? pkg.piEfficiencyStudy.sourceCommit
+			: undefined,
 });
 
 // e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR

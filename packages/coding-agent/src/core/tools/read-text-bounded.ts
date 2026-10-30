@@ -1,5 +1,5 @@
 import { open } from "node:fs/promises";
-import { DEFAULT_MAX_BYTES, truncateHead, type TruncationResult } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, type TruncationResult, truncateHead } from "./truncate.ts";
 
 /** Scan the complete file for exact totals, retaining only enough text for truncateHead. */
 export async function readTextBounded(
