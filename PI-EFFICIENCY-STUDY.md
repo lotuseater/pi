@@ -112,3 +112,17 @@ bytes and local costs using an in-memory response; it makes no model/network cal
 Installation-specific bundle, wrapper, rollback and process-identity checks remain
 separate local release gates. Unique or short outputs can receive reference-marker
 overhead; no universal token or end-to-end speed improvement is claimed.
+
+
+## Version 8 candidate: exact repeated listing/file-name results
+
+Extends the existing exact-result projection to native `ls` and `find` only. Each operation still executes. The identity binds resolved absolute root, exact tool/arguments, emitted text, material details and every limit/truncation notice. Only identical observed TOOL RESULTS can reference an exact full anchor in the same outgoing request; nothing asserts an unobserved directory is unchanged. Saved raw histories remain full; summary restoration, compaction/eviction fallback and explicit `force=true` apply. Custom backends/errors/abort/unsupported metadata bypass. CLI references retain their existing default-on policy; SDK/source need `PI_CONTEXT_RESULT_REFERENCES=1`. Changed-read deltas remain separately OFF by default.
+
+Three interleaved synthetic rounds, 1,600 small files and actual optional `ls`/`find` declarations: repeated default-limited `ls` 70,991→25,822 bytes (-63.63%); narrow repeated `find` 15,713→7,416 (-52.80%); mixed listing limits 43,674→39,997 (-8.42%). Native limited `fd` returns can vary in selected subset/order: broad/default-limited searches had zero references and grew about0.46–0.62% from schema/anchor overhead. We did not sort or change selected outputs. Capture every native result once, then compare the two projections on identical evidence. The default four coding tools omit ls/find, so those sessions gain0 from8. No billed-token, server-throughput or model-quality-equivalence claim.
+
+Reproduce with Node24 and prepared source dependencies:
+```sh
+PI_CONTEXT_RESULT_REFERENCES=1 node --import ./packages/coding-agent/src/experimental/source-resolver.ts --test scripts/pi-efficiency/list-references.test.mjs
+PI_CONTEXT_RESULT_REFERENCES=1 node --import ./packages/coding-agent/src/experimental/source-resolver.ts scripts/pi-efficiency/list-references-wire.mjs > list-wire.json
+```
+The public wire probe emulates Pi7's complete bypass for these two tool names; owner qualification additionally compared the actual installed7 projection. Full source build/check and cumulative focused tests are required before release. Source metadata remains1.4.0; the portable package stamps immutable custom8 identity.

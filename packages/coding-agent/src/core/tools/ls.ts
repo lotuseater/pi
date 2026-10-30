@@ -2,6 +2,7 @@ import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { lsRenderers } from "./renderers/ls.ts";
@@ -9,9 +10,16 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const lsSchema = Type.Object({
+	force: Type.Optional(
+		Type.Boolean({
+			description:
+				"Resend full text instead of a reference to an identical observed tool result already in this request",
+		}),
+	),
 	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
 });
+if (!CONTEXT_REFERENCES_ENABLED) Reflect.deleteProperty(lsSchema.properties, "force");
 
 export const lsToolSystemPromptContribution = {
 	snippet: "List directory contents",
@@ -23,6 +31,7 @@ export type LsToolInput = Static<typeof lsSchema>;
 const DEFAULT_LIMIT = 500;
 
 export interface LsToolDetails {
+	piReadOnlySnapshot?: ReadOnlySnapshot;
 	truncation?: TruncationResult;
 	entryLimitReached?: number;
 }
@@ -155,6 +164,15 @@ export function createLsToolDefinition(
 							output += `\n\n[${notices.join(". ")}]`;
 						}
 
+						if (CONTEXT_REFERENCES_ENABLED && !options?.operations) {
+							details.piReadOnlySnapshot = {
+								version: 2,
+								tool: "ls",
+								identity: dirPath,
+								scope: "tool-result",
+								partial: entryLimitReached || truncation.truncated,
+							};
+						}
 						resolve({
 							content: [{ type: "text", text: output }],
 							details: Object.keys(details).length > 0 ? details : undefined,

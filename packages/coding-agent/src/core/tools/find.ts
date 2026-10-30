@@ -4,6 +4,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { findRenderers } from "./renderers/find.ts";
@@ -24,12 +25,19 @@ export function relativizeFindResultPath(
 }
 
 const findSchema = Type.Object({
+	force: Type.Optional(
+		Type.Boolean({
+			description:
+				"Resend full text instead of a reference to an identical observed tool result already in this request",
+		}),
+	),
 	pattern: Type.String({
 		description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
 	}),
 	path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
 });
+if (!CONTEXT_REFERENCES_ENABLED) Reflect.deleteProperty(findSchema.properties, "force");
 
 export const findToolSystemPromptContribution = {
 	snippet: "Find files by glob pattern (respects .gitignore)",
@@ -41,6 +49,7 @@ export type FindToolInput = Static<typeof findSchema>;
 const DEFAULT_LIMIT = 1000;
 
 export interface FindToolDetails {
+	piReadOnlySnapshot?: ReadOnlySnapshot;
 	truncation?: TruncationResult;
 	resultLimitReached?: number;
 }
@@ -290,6 +299,15 @@ export function createFindToolDefinition(
 							}
 							if (notices.length > 0) {
 								resultOutput += `\n\n[${notices.join(". ")}]`;
+							}
+							if (CONTEXT_REFERENCES_ENABLED) {
+								details.piReadOnlySnapshot = {
+									version: 2,
+									tool: "find",
+									identity: searchPath,
+									scope: "tool-result",
+									partial: resultLimitReached || truncation.truncated,
+								};
 							}
 							settle(() =>
 								resolve({

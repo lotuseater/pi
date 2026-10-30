@@ -10,7 +10,7 @@ export const CONTEXT_READ_DELTAS_ENABLED = process.env.PI_CONTEXT_READ_DELTAS ==
 
 export type ReadOnlySnapshot =
 	| { version: 1; tool: "read" | "grep"; identity: string }
-	| { version: 2; tool: "grep"; identity: string; scope: "tool-result"; partial: boolean };
+	| { version: 2; tool: "grep" | "find" | "ls"; identity: string; scope: "tool-result"; partial: boolean };
 
 function canonical(
 	value: unknown,
@@ -104,7 +104,7 @@ export function referenceReadOnlyResults(
 			if (message.stopReason === "aborted" || message.stopReason === "error" || message.stopReason === "pending")
 				return message;
 			for (const block of message.content) {
-				if (block.type !== "toolCall" || (block.name !== "read" && block.name !== "grep")) continue;
+				if (block.type !== "toolCall" || !["read", "grep", "find", "ls"].includes(block.name)) continue;
 				if (!block.arguments || typeof block.arguments !== "object" || Array.isArray(block.arguments)) continue;
 				calls.set(block.id, { name: block.name, args: block.arguments });
 				while (calls.size > maxEntries) calls.delete(calls.keys().next().value!);
@@ -127,10 +127,11 @@ export function referenceReadOnlyResults(
 		if (!snapshot || snapshot.tool !== call.name || typeof snapshot.identity !== "string") return message;
 		const observedResult =
 			snapshot.version === 2 &&
-			snapshot.tool === "grep" &&
+			["grep", "find", "ls"].includes(snapshot.tool) &&
 			snapshot.scope === "tool-result" &&
 			typeof snapshot.partial === "boolean";
 		if (snapshot.version !== 1 && !observedResult) return message;
+		if (snapshot.version === 1 && !["read", "grep"].includes(snapshot.tool)) return message;
 		if (!observedResult && (details?.truncation?.truncated || details?.linesTruncated || details?.matchLimitReached))
 			return message;
 		if (message.content.length !== 1 || message.content[0].type !== "text") return message;
@@ -182,7 +183,7 @@ export function referenceReadOnlyResults(
 			return message;
 		}
 		const resultLabel = observedResult
-			? `grep TOOL RESULT${snapshot.partial ? " (observed portion; limits/notices retained)" : ""}`
+			? `${snapshot.tool} TOOL RESULT${snapshot.partial ? " (observed portion; limits/notices retained)" : ""}`
 			: `${snapshot.tool} result`;
 		if (snapshots.has(id)) {
 			const size = snapshots.get(id)!;
@@ -194,7 +195,7 @@ export function referenceReadOnlyResults(
 				content: [
 					{
 						type: "text",
-						text: `[Unchanged ${observedResult ? "grep TOOL RESULT (search executed again; unobserved content is not asserted unchanged)" : "read-only result"}; full Pi snapshot ${id} is included earlier in this request. Use force=true to resend full text.]`,
+						text: `[Unchanged ${observedResult ? `${snapshot.tool} TOOL RESULT (${snapshot.tool === "ls" ? "listing" : "search"} executed again; unobserved content is not asserted unchanged)` : "read-only result"}; full Pi snapshot ${id} is included earlier in this request. Use force=true to resend full text.]`,
 					},
 				],
 			};
