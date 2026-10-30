@@ -1,0 +1,82 @@
+--- a/pi-task
++++ b/pi-task
+@@ -1987,12 +1987,46 @@
+     return len(seqs)
+ 
+ 
++def attested_runtime(sess, st, alive):
++    """Only a live same-session PID/start/boot receipt attests a running build."""
++    unknown = lambda reason: {"verified": False, "version": None, "source_revision": None, "reason": reason}
++    receipt = st.get("runtime_identity")
++    if not alive or st.get("stopped"):
++        return unknown("not running")
++    if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
++        return unknown("legacy or missing runtime receipt")
++    pid = st.get("pid")
++    if type(pid) is not int or pid <= 0 or type(receipt.get("pid")) is not int or receipt["pid"] != pid:
++        return unknown("PID or process start mismatch")
++    if not isinstance(receipt.get("start"), str) or not receipt["start"].isdigit() or process_start(pid) != receipt["start"]:
++        return unknown("PID or process start mismatch")
++    try:
++        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
++    except OSError:
++        return unknown("boot identity unavailable")
++    if not receipt.get("boot_id") or receipt["boot_id"] != boot:
++        return unknown("boot identity mismatch")
++    sid = st.get("session_id")
++    if not isinstance(sid, str) or not sid or receipt.get("session_id") != sid or sess.meta().get("pi_session_id") != sid:
++        return unknown("conversation identity mismatch")
++    if not runs_pi(sess.dir, pid):
++        return unknown("process ownership not verified")
++    version = receipt.get("version")
++    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,159}", version):
++        return unknown("runtime version unavailable")
++    source = receipt.get("source_revision")
++    source = source if isinstance(source, str) and re.fullmatch(r"[a-f0-9]{40}", source) else None
++    return {"verified": True, "version": version, "source_revision": source,
++            "pid": pid, "start": receipt["start"], "boot_id": boot, "session_id": sid}
++
++
+ def cmd_status(a):
+     sess = resolve(a.session)
+     m, st, all_panes = sess.meta(), sess.state(), panes()
+     alive = sess.alive(all_panes)
+     state, cut = describe_state(sess, st, alive, all_panes), interruption(sess, st, alive)
+     clients = sess.clients() if alive else []
++    runtime_identity = attested_runtime(sess, st, alive)
+     slot = None
+     if state == "waiting":
+         cap, _, users, line, _ = slot_view(slot_model(sess.name))
+@@ -2000,12 +2034,15 @@
+                 "position": line.index(sess.name) + 1 if sess.name in line else None}
+     if a.json:
+         print(json.dumps({"session": sess.name, "state": state, "interruption": cut, "slot": slot, "meta": m,
+-                          "runtime": st, "process_running": alive, "windows": len(clients),
++                          "runtime": st, "runtime_identity": runtime_identity, "process_running": alive, "windows": len(clients),
+                           "pane": sess.pane(all_panes)}, ensure_ascii=False, indent=1))
+         return 0
+     tokens = st.get("tokens") or {}
+     shown = (f"waiting for a Qwen slot ({waiting_note(sess.name, users, line, cap)})" if slot else state)
+-    rows = [("state", shown + (f" ({cut})" if cut else "")
++    rows = [("pi version", (runtime_identity["version"] + " (running; PID/start/boot verified)"
++                            if runtime_identity["verified"] else "unknown (" + runtime_identity["reason"] + ")")),
++            ("source", runtime_identity.get("source_revision") or "unknown"),
++            ("state", shown + (f" ({cut})" if cut else "")
+                       + (f" · last: {st['activity']} ({fmt_dur(time.time() - st['activity_at'])} ago)"
+                          if alive and st.get("activity") and st.get("activity_at") else "")),
+             ("model", f"{st.get('provider') or m['provider']}/{st.get('model') or m['model']} · thinking "
+@@ -2433,7 +2470,13 @@
+         print(f"{PROG}: cannot resolve the current managed Pi release", file=sys.stderr)
+         return 127
+     env["PI_TASK_PI"] = exe
+-    extension = env.get("PI_TASK_EXTENSION") or str(Path(os.path.realpath(__file__)).with_name("pi-task-extension.ts"))
++    release = Path(exe).parent.parent.parent
++    versioned_extension = release / "pi-task-extension.ts"
++    has_versioned_extension = (Path(exe).parent.name == ".bin" and Path(exe).parent.parent.name == "node_modules"
++                               and versioned_extension.is_file()
++                               and versioned_extension.resolve().is_relative_to(release.resolve()))
++    extension = env.get("PI_TASK_EXTENSION") or (str(versioned_extension) if has_versioned_extension else
++                str(Path(os.path.realpath(__file__)).with_name("pi-task-extension.ts")))
+     if not m:
+         print(f"{PROG}: cannot start pi: no session {name}", file=sys.stderr)
+         return 127

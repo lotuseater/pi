@@ -1,11 +1,13 @@
-import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
+import { readFile as fsReadFile, realpath as fsRealpath, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { type GrepContextLines, readGrepContextLines } from "./grep-context-lines.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { grepRenderers } from "./renderers/grep.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -19,6 +21,7 @@ import {
 } from "./truncate.ts";
 
 const grepSchema = Type.Object({
+	...(CONTEXT_REFERENCES_ENABLED ? { force: Type.Optional(Type.Boolean({ description: "Resend full text instead of a reference to an identical result already in this request" })) } : {}),
 	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
 	path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
 	glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" })),
@@ -41,6 +44,7 @@ export type GrepToolInput = Static<typeof grepSchema>;
 const DEFAULT_LIMIT = 100;
 
 export interface GrepToolDetails {
+	piReadOnlySnapshot?: ReadOnlySnapshot;
 	truncation?: TruncationResult;
 	matchLimitReached?: number;
 	linesTruncated?: boolean;
@@ -132,6 +136,12 @@ export function createGrepToolDefinition(
 							return;
 						}
 
+						// Canonical identity is best-effort metadata only: never suppress a search
+						// or change its result/error if a concurrent rename prevents realpath.
+						let snapshotIdentity: string | undefined;
+						if (CONTEXT_REFERENCES_ENABLED && !customOps) {
+							try { snapshotIdentity = await fsRealpath(searchPath); } catch { /* full-result fallback */ }
+						}
 						const contextValue = context && context > 0 ? context : 0;
 						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
 						const formatPath = (filePath: string): string => {
@@ -144,13 +154,23 @@ export function createGrepToolDefinition(
 							return path.basename(filePath);
 						};
 
-						const fileCache = new Map<string, string[]>();
-						const getFileLines = async (filePath: string): Promise<string[]> => {
+						const fileCache = new Map<string, GrepContextLines>();
+						const getFileLines = async (filePath: string): Promise<GrepContextLines> => {
 							let lines = fileCache.get(filePath);
 							if (!lines) {
 								try {
-									const content = await ops.readFile(filePath);
-									lines = content.replace(/\r\n/g, "\n").split("\n");
+									if (!customOps && Number.isSafeInteger(contextValue)) {
+										lines = await readGrepContextLines(
+											filePath,
+											matches.filter((match) => match.filePath === filePath).map((match) => match.lineNumber),
+											contextValue,
+											GREP_MAX_LINE_LENGTH,
+											signal,
+										);
+									} else {
+										const content = await ops.readFile(filePath);
+										lines = content.replace(/\r\n/g, "\n").split("\n");
+									}
 								} catch {
 									lines = [];
 								}
@@ -192,6 +212,7 @@ export function createGrepToolDefinition(
 							stopChild();
 						};
 						signal?.addEventListener("abort", onAbort, { once: true });
+						if (signal?.aborted) onAbort();
 						child.stderr?.on("data", (chunk) => {
 							stderr += chunk.toString();
 						});
@@ -264,6 +285,10 @@ export function createGrepToolDefinition(
 
 							// Format matches after streaming finishes so custom readFile() backends can be async.
 							for (const match of matches) {
+								if (signal?.aborted) {
+									settle(() => reject(new Error("Operation aborted")));
+									return;
+								}
 								if (contextValue === 0 && match.lineText !== undefined) {
 									const relativePath = formatPath(match.filePath);
 									const sanitized = match.lineText
@@ -279,11 +304,18 @@ export function createGrepToolDefinition(
 								}
 							}
 
+							if (signal?.aborted) {
+								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
 							const rawOutput = outputLines.join("\n");
 							// Apply byte truncation. There is no line limit here because the match limit already capped rows.
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let output = truncation.content;
 							const details: GrepToolDetails = {};
+							if (snapshotIdentity) {
+								details.piReadOnlySnapshot = { version: 2, tool: "grep", identity: snapshotIdentity, scope: "tool-result", partial: matchLimitReached || linesTruncated || truncation.truncated };
+							}
 							// Build actionable notices for truncation and match limits.
 							const notices: string[] = [];
 							if (matchLimitReached) {

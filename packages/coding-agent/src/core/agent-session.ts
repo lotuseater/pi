@@ -1,3 +1,4 @@
+import { RUNTIME_IDENTITY } from "../config.ts";
 /**
  * AgentSession - Core abstraction for agent lifecycle and session management.
  *
@@ -2111,6 +2112,14 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// This reserved local command never creates a user message, queue item or model turn.
+		if (text.trim().split(/\s+/, 1)[0] === "/version") {
+			const message = `Running Pi${RUNTIME_IDENTITY.custom ? " custom" : ""} ${RUNTIME_IDENTITY.version} · source ${RUNTIME_IDENTITY.sourceRevision ?? "unknown"} · pid ${process.pid}`;
+			if (this._extensionUIContext) this._extensionUIContext.notify(message, "info");
+			else console.log(message);
+			options?.preflightResult?.("handled");
+			return;
+		}
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;

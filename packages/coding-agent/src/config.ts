@@ -554,6 +554,7 @@ export function detectInstallChange(packageJsonPath = startupPackageJsonPath): I
 // =============================================================================
 
 interface PackageJson {
+	piEfficiencyStudy?: { sourceCommit?: string };
 	name?: string;
 	version?: string;
 	piConfig?: {
@@ -580,6 +581,13 @@ export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 export const VERSION: string = pkg.version || "0.0.0";
+/** Captured from this process's package at startup; never from an install selector. */
+export const RUNTIME_IDENTITY = Object.freeze({
+	version: VERSION,
+	custom: VERSION.includes("+local."),
+	sourceRevision: typeof pkg.piEfficiencyStudy?.sourceCommit === "string" && /^[a-f0-9]{40}$/.test(pkg.piEfficiencyStudy.sourceCommit)
+		? pkg.piEfficiencyStudy.sourceCommit : undefined,
+});
 
 // e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
 export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;

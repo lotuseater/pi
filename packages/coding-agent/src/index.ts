@@ -11,6 +11,7 @@ export {
 	getPackageDir,
 	getReadmePath,
 	VERSION,
+	RUNTIME_IDENTITY,
 } from "./config.ts";
 export {
 	AgentSession,
