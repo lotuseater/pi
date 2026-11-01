@@ -5,7 +5,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
-import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot, readOnlySnapshotsEnabled } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { type GrepContextLines, readGrepContextLines } from "./grep-context-lines.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -145,7 +145,7 @@ export function createGrepToolDefinition(
 						// Canonical identity is best-effort metadata only: never suppress a search
 						// or change its result/error if a concurrent rename prevents realpath.
 						let snapshotIdentity: string | undefined;
-						if (CONTEXT_REFERENCES_ENABLED && !customOps) {
+						if (readOnlySnapshotsEnabled() && !customOps) {
 							try {
 								snapshotIdentity = await fsRealpath(searchPath);
 							} catch {

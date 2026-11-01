@@ -8,11 +8,30 @@ export const CONTEXT_REFERENCES_ENABLED = process.env.PI_CONTEXT_RESULT_REFERENC
 /** Separate opt-in until changed-file projections are qualified for the caller. */
 export const CONTEXT_READ_DELTAS_ENABLED = process.env.PI_CONTEXT_READ_DELTAS === "1";
 
+let readOnlySnapshots = CONTEXT_REFERENCES_ENABLED;
+
+/**
+ * Whether builtin read-only tools stamp their exact-result marker. Session setup turns this on for
+ * consumers that need provenance without turning on reference projection, namely the tool vault.
+ */
+export function readOnlySnapshotsEnabled(): boolean {
+	return readOnlySnapshots;
+}
+
+/** Ask builtin read-only tools to stamp their exact-result marker from now on. */
+export function enableReadOnlySnapshots(): void {
+	readOnlySnapshots = true;
+}
+
 export type ReadOnlySnapshot =
 	| { version: 1; tool: "read" | "grep"; identity: string }
 	| { version: 2; tool: "grep" | "find" | "ls"; identity: string; scope: "tool-result"; partial: boolean };
 
-function canonical(
+/**
+ * Sort keys and reject anything that is not plain JSON, so identity and stored provenance are
+ * byte-stable across processes and restarts. Bounded by nodes and bytes.
+ */
+export function canonicalToolMetadata(
 	value: unknown,
 	ancestors = new Set<object>(),
 	depth = 0,
@@ -43,7 +62,7 @@ function canonical(
 					throw new Error("Non-JSON property");
 				budget.bytes -= Buffer.byteLength(key, "utf8");
 				if (budget.bytes < 0) throw new Error("Metadata exceeds byte bound");
-				return [key, canonical(descriptor.value, ancestors, depth + 1, budget)] as const;
+				return [key, canonicalToolMetadata(descriptor.value, ancestors, depth + 1, budget)] as const;
 			});
 		if (array)
 			return entries.map((entry, index) => {
@@ -156,13 +175,13 @@ export function referenceReadOnlyResults(
 				if (typeof key !== "string" || !descriptor.enumerable || !("value" in descriptor)) return message;
 				material[key] = descriptor.value;
 			}
-			const materialJson = JSON.stringify(canonical(material));
+			const materialJson = JSON.stringify(canonicalToolMetadata(material));
 			entryBytes = bytes + Buffer.byteLength(materialJson, "utf8");
 			if (entryBytes > maxBytes) return message;
-			const identity = [snapshot.tool, snapshot.identity, canonical(args), text];
+			const identity = [snapshot.tool, snapshot.identity, canonicalToolMetadata(args), text];
 			// Preserve existing v1 anchors when there is no additional material metadata.
 			if (observedResult || Object.keys(material).length > 0)
-				identity.push(canonical(snapshot), canonical(material));
+				identity.push(canonicalToolMetadata(snapshot), canonicalToolMetadata(material));
 			id = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 			// Initial delta support is deliberately restricted to complete local files.
 			if (
@@ -175,7 +194,7 @@ export function referenceReadOnlyResults(
 				Object.keys(material).length === 0
 			) {
 				readFamily = createHash("sha256")
-					.update(JSON.stringify([snapshot.identity, canonical(args)]))
+					.update(JSON.stringify([snapshot.identity, canonicalToolMetadata(args)]))
 					.digest("hex");
 			}
 		} catch {

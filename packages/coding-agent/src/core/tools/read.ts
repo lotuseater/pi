@@ -5,7 +5,7 @@ import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/p
 import { type Static, Type } from "typebox";
 import { processImage } from "../../utils/image-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
-import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot, readOnlySnapshotsEnabled } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { resolveReadPathAsync } from "./path-utils.ts";
 import { readTextBounded } from "./read-text-bounded.ts";
@@ -241,7 +241,7 @@ export function createReadToolDefinition(
 							}
 
 							if (
-								CONTEXT_REFERENCES_ENABLED &&
+								readOnlySnapshotsEnabled() &&
 								!options?.operations &&
 								!mimeType &&
 								!details?.truncation?.truncated &&

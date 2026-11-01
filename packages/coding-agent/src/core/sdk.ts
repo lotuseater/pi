@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import { getCurrentTools, type ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -8,6 +8,7 @@ import { AgentSession, markRuntimeStreamFunction } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { getClientIdentity } from "./client-identity.ts";
+import { enableReadOnlySnapshots } from "./context-references.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { createToolNameMatcher } from "./mcp-servers.ts";
@@ -25,6 +26,8 @@ import {
 	SettingsManager,
 } from "./settings-manager.ts";
 import { time } from "./timings.ts";
+import { openToolVault, resolveToolVaultConfig, toolVaultIdentity } from "./tool-vault.ts";
+import { TOOL_VAULT_RECALL_TOOL_NAME, vaultReadOnlyResults } from "./tool-vault-projection.ts";
 import {
 	createBashTool,
 	createCodingTools,
@@ -38,6 +41,7 @@ import {
 	createWriteTool,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+import { createRecallToolDefinition } from "./tools/recall.ts";
 import { getBranchSelection } from "./virtual-models.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
@@ -293,6 +297,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const isExcludedTool = excludedToolNames ? createToolNameMatcher(excludedToolNames) : undefined;
 	const initialActiveToolNames = (selectedToolNames ?? defaultToolNames).filter((name) => !isExcludedTool?.(name));
 
+	// Opt-in local vault for successful tool output. The tool and the projection must agree: while
+	// the recall tool is not declared to the model, nothing may be hidden.
+	const toolVaultConfig = resolveToolVaultConfig(settingsManager.getToolVaultSettings(), process.env, agentDir);
+	const toolVault = openToolVault({
+		config: toolVaultConfig,
+		identity: () =>
+			toolVaultConfig.enabled
+				? toolVaultIdentity(sessionManager.getSessionFile(), sessionManager.getSessionId())
+				: undefined,
+		sessionFile: () => sessionManager.getSessionFile(),
+	});
+	const recallToolDefinition = toolVaultConfig.enabled
+		? createRecallToolDefinition(cwd, { vault: toolVault })
+		: undefined;
+	if (toolVaultConfig.enabled) {
+		// Archived results need exact-result provenance even when reference projection stays off.
+		enableReadOnlySnapshots();
+		// The recall tool is registered but starts inactive: its declaration costs request bytes on
+		// every turn, so a session that never archives anything never pays for it. AgentSession
+		// activates it at the next safe turn boundary after the first record is stored.
+	}
+	const toolVaultState = { recallAvailable: false, recallPossible: false };
+
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
 		const converted = convertToLlm(messages);
@@ -328,6 +355,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			return msg;
 		});
+	};
+
+	// Archived output is only ever replaced by a reference the model can read back in this session.
+	// Retiring aged results happens before convertToLlm so it sees stored messages, exactly as the
+	// session keeps them, and so it stays independent of the exact-reference projection inside it.
+	const convertToLlmWithVault = (messages: AgentMessage[]): Message[] => {
+		const archived = toolVaultConfig.enabled
+			? vaultReadOnlyResults(messages, {
+					vault: toolVault,
+					recallAvailable:
+						toolVaultState.recallAvailable &&
+						getCurrentTools(messages.filter((message) => message.role === "system")).some(
+							(tool) => tool.name === TOOL_VAULT_RECALL_TOOL_NAME,
+						),
+					archiveAllowed: toolVaultState.recallPossible,
+					sessionId: sessionManager.getSessionId(),
+				})
+			: messages;
+		return convertToLlmWithBlockImages(archived);
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
@@ -408,7 +454,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: [],
 			messages: existingSession.messages,
 		},
-		convertToLlm: convertToLlmWithBlockImages,
+		convertToLlm: convertToLlmWithVault,
 		streamFn: async (model, context, options) => {
 			const requestOptions = buildRequestOptions(options);
 			// Compaction and summaries use their own routing ids; only session requests
@@ -459,7 +505,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		cwd,
 		scopedModels: options.scopedModels,
 		resourceLoader,
-		customTools: options.customTools,
+		// ToolDefinition is invariant in its parameter schema; the registry keys tools by name only.
+		customTools: recallToolDefinition
+			? [...(options.customTools ?? []), recallToolDefinition as ToolDefinition]
+			: options.customTools,
 		modelRuntime,
 		cacheWarmer,
 		initialActiveToolNames,
@@ -469,6 +518,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		toolVaultActivation: () =>
+			toolVaultConfig.enabled && toolVaultState.recallPossible && toolVault.hasStoredRecords(),
+		toolVaultAvailability: (state) => {
+			toolVaultState.recallAvailable = state.active;
+			toolVaultState.recallPossible = state.possible;
+		},
 	});
 
 	const extensionsResult = resourceLoader.getExtensions();

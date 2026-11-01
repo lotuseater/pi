@@ -640,6 +640,68 @@
         }
       }
     },
+    "toolVault": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable local tool-output archiving and retrievable context projections. Opt-in.",
+          "default": false
+        },
+        "retireOldResults": {
+          "type": "boolean",
+          "description": "Retire old successful tool results.",
+          "default": true
+        },
+        "compactShellOutput": {
+          "type": "boolean",
+          "description": "Compact repeated lines and progress updates in successful Bash output.",
+          "default": false
+        },
+        "dir": {
+          "type": "string",
+          "description": "Vault root directory. Default: <agentDir>/tool-vault."
+        },
+        "minBytes": {
+          "type": "number",
+          "description": "Smallest tool result, in bytes, that may be archived."
+        },
+        "keepRecentResults": {
+          "type": "number",
+          "description": "Most recent tool results that always stay full."
+        },
+        "minAssistantTurnsOld": {
+          "type": "number",
+          "description": "Completed assistant/tool rounds a result must have aged past.",
+          "default": 2
+        },
+        "minUserTurnsOld": {
+          "type": "number",
+          "description": "Answered user turns a result must have aged past.",
+          "default": 0
+        },
+        "maxRecordBytes": {
+          "type": "number",
+          "description": "Largest single archived record, in bytes."
+        },
+        "maxSessionBytes": {
+          "type": "number",
+          "description": "Bytes one session store may hold."
+        },
+        "maxRecords": {
+          "type": "number",
+          "description": "Records one session store may hold."
+        },
+        "rootBytes": {
+          "type": "number",
+          "description": "Root budget limiting store admission; concurrent writes can overshoot session quotas."
+        },
+        "maxRecallBytes": {
+          "type": "number",
+          "description": "Largest recall answer, in bytes."
+        }
+      }
+    },
     "sessionDir": {
       "type": "string",
       "description": "Custom session storage directory, in the same format as the --session-dir CLI flag."

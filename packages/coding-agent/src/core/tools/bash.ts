@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
@@ -16,6 +17,7 @@ import {
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
+import type { ShellSnapshot } from "./shell-output.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
@@ -66,6 +68,7 @@ export type BashToolOutput = Static<typeof bashOutputSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	piShellSnapshot?: ShellSnapshot;
 }
 
 /**
@@ -405,7 +408,25 @@ export function createShellToolDefinition(
 						isError: true,
 					};
 				}
-				return { content: [{ type: "text", text: outputText }], details, structuredContent };
+				const successDetails: BashToolDetails | undefined =
+					config.name === "bash"
+						? {
+								...details,
+								piShellSnapshot: {
+									version: 1,
+									tool: "bash",
+									cwd: spawnContext.cwd,
+									requestedCommand: command,
+									command: spawnContext.command,
+									exitCode: 0,
+									wallTimeSeconds,
+									sha256: createHash("sha256").update(outputText, "utf8").digest("hex"),
+									bytes: Buffer.byteLength(outputText, "utf8"),
+									complete: !snapshot.truncation.truncated,
+								},
+							}
+						: details;
+				return { content: [{ type: "text", text: outputText }], details: successDetails, structuredContent };
 			} finally {
 				clearUpdateTimer();
 			}

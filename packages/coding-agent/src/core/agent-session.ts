@@ -147,6 +147,7 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
+import { TOOL_VAULT_RECALL_TOOL_NAME } from "./tool-vault-projection.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -278,6 +279,13 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	/**
+	 * Called whenever the tool loadout changes, with whether the vault recall tool is active. The
+	 * vault may only hide tool output while the model can call the tool that reads it back.
+	 */
+	toolVaultAvailability?: (state: { active: boolean; possible: boolean }) => void;
+	/** Whether this session's vault already holds records, so the recall tool can be activated. */
+	toolVaultActivation?: () => boolean;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
 	/**
@@ -450,6 +458,8 @@ export class AgentSession {
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	private _toolVaultAvailability?: (state: { active: boolean; possible: boolean }) => void;
+	private _toolVaultActivation?: () => boolean;
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
@@ -520,6 +530,8 @@ export class AgentSession {
 		}
 		this._excludedTools = config.excludedToolNames ? createToolNameMatcher(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._toolVaultAvailability = config.toolVaultAvailability;
+		this._toolVaultActivation = config.toolVaultActivation;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -537,6 +549,7 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+		this._activateToolVaultRecall();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -1211,6 +1224,9 @@ export class AgentSession {
 		// handlers queued.
 		if (event.type === "turn_end") {
 			this._flushPendingCustomMessages();
+			// The preceding request may have archived its first output. Activate retrieval before
+			// the next turn's loadout is declared, including within one autonomous user request.
+			this._activateToolVaultRecall();
 		}
 	};
 
@@ -1658,6 +1674,15 @@ export class AgentSession {
 		}
 		this._hiddenDeclarations = hidden;
 		this.agent.state.tools = declared;
+		// prepareLoadout can hide a declaration without deactivating its executable tool.
+		// References require a directly declared retrieval tool in this exact request.
+		this._toolVaultAvailability?.({
+			active:
+				declared.some((tool) => tool.name === TOOL_VAULT_RECALL_TOOL_NAME) &&
+				!hidden.has(TOOL_VAULT_RECALL_TOOL_NAME),
+			possible:
+				this._toolRegistry.has(TOOL_VAULT_RECALL_TOOL_NAME) && this._isAllowedTool(TOOL_VAULT_RECALL_TOOL_NAME),
+		});
 		return declared;
 	}
 
@@ -1880,6 +1905,15 @@ export class AgentSession {
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
 		// Ignores names that are not registered.
 		this._setActiveTools(names);
+		this._activateToolVaultRecall();
+	}
+
+	/** Activate retrieval at a turn boundary after the first durable archive record exists. */
+	private _activateToolVaultRecall(): void {
+		if (this._toolVaultActivation?.() && !this.getActiveToolNames().includes(TOOL_VAULT_RECALL_TOOL_NAME)) {
+			const active = [...this.getActiveToolNames(), TOOL_VAULT_RECALL_TOOL_NAME];
+			if (this._isAllowedTool(TOOL_VAULT_RECALL_TOOL_NAME)) this._setActiveTools(active);
+		}
 	}
 
 	// =========================================================================

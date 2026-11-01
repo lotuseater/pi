@@ -4,7 +4,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
-import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot, readOnlySnapshotsEnabled } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { findRenderers } from "./renderers/find.ts";
@@ -300,7 +300,7 @@ export function createFindToolDefinition(
 							if (notices.length > 0) {
 								resultOutput += `\n\n[${notices.join(". ")}]`;
 							}
-							if (CONTEXT_REFERENCES_ENABLED) {
+							if (readOnlySnapshotsEnabled()) {
 								details.piReadOnlySnapshot = {
 									version: 2,
 									tool: "find",

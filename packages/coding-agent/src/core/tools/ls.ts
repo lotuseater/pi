@@ -2,7 +2,7 @@ import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
-import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot } from "../context-references.ts";
+import { CONTEXT_REFERENCES_ENABLED, type ReadOnlySnapshot, readOnlySnapshotsEnabled } from "../context-references.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { lsRenderers } from "./renderers/ls.ts";
@@ -164,7 +164,7 @@ export function createLsToolDefinition(
 							output += `\n\n[${notices.join(". ")}]`;
 						}
 
-						if (CONTEXT_REFERENCES_ENABLED && !options?.operations) {
+						if (readOnlySnapshotsEnabled() && !options?.operations) {
 							details.piReadOnlySnapshot = {
 								version: 2,
 								tool: "ls",

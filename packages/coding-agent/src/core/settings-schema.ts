@@ -71,6 +71,41 @@ const RetrySettingsSchema = Type.Object({
 	),
 });
 
+/** Bounds for the local tool-output vault. Defaults live in core/tool-vault.ts. */
+const ToolVaultSettingsSchema = Type.Object({
+	enabled: Type.Optional(
+		Type.Boolean({
+			description: "Enable local tool-output archiving and retrievable context projections. Opt-in.",
+			default: false,
+		}),
+	),
+	retireOldResults: Type.Optional(Type.Boolean({ description: "Retire old successful tool results.", default: true })),
+	compactShellOutput: Type.Optional(
+		Type.Boolean({
+			description: "Compact repeated lines and progress updates in successful Bash output.",
+			default: false,
+		}),
+	),
+	dir: Type.Optional(Type.String({ description: "Vault root directory. Default: <agentDir>/tool-vault." })),
+	minBytes: Type.Optional(Type.Number({ description: "Smallest tool result, in bytes, that may be archived." })),
+	keepRecentResults: Type.Optional(Type.Number({ description: "Most recent tool results that always stay full." })),
+	minAssistantTurnsOld: Type.Optional(
+		Type.Number({ description: "Completed assistant/tool rounds a result must have aged past.", default: 2 }),
+	),
+	minUserTurnsOld: Type.Optional(
+		Type.Number({ description: "Answered user turns a result must have aged past.", default: 0 }),
+	),
+	maxRecordBytes: Type.Optional(Type.Number({ description: "Largest single archived record, in bytes." })),
+	maxSessionBytes: Type.Optional(Type.Number({ description: "Bytes one session store may hold." })),
+	maxRecords: Type.Optional(Type.Number({ description: "Records one session store may hold." })),
+	rootBytes: Type.Optional(
+		Type.Number({
+			description: "Root budget limiting store admission; concurrent writes can overshoot session quotas.",
+		}),
+	),
+	maxRecallBytes: Type.Optional(Type.Number({ description: "Largest recall answer, in bytes." })),
+});
+
 const TerminalSettingsSchema = Type.Object({
 	showImages: Type.Optional(
 		Type.Boolean({
@@ -391,6 +426,7 @@ export const SettingsSchema = Type.Object(
 		markdown: Type.Optional(MarkdownSettingsSchema),
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
+		toolVault: Type.Optional(ToolVaultSettingsSchema),
 		sessionDir: Type.Optional(
 			Type.String({
 				description: "Custom session storage directory, in the same format as the --session-dir CLI flag.",

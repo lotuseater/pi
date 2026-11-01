@@ -903,6 +903,11 @@ export class SettingsManager {
 		return this.settings.branchSummary?.skipPrompt ?? SETTINGS_DEFAULTS.branchSummary.skipPrompt;
 	}
 
+	/** Raw `toolVault` settings. core/tool-vault.ts owns the defaults and clamps every value. */
+	getToolVaultSettings(): Settings["toolVault"] {
+		return this.settings.toolVault;
+	}
+
 	getRetryEnabled(): boolean {
 		return this.settings.retry?.enabled ?? SETTINGS_DEFAULTS.retry.enabled;
 	}
