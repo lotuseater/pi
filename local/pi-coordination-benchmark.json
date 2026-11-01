@@ -1,0 +1,513 @@
+{
+  "formatVersion": 1,
+  "results": [
+    {
+      "parentSha256": "48dcae6fe4328b10afa7ce76e8d153ad9dd5f9742094ad3ce00fd5b16743b6b2",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 2203252,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 97085318,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -1.800376517030093
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 486263,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95368329,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 1.768536206473568,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 478743,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95360809,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 1.776281970874319,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.0078852173240867
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 815519,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95697585,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 1.429395328344086,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.3452466908589748
+        }
+      ]
+    },
+    {
+      "parentSha256": "b21a00c5b52549761902f4619cfdbd6a274d647daf4810d50c0afb92db2f9f1b",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 3891778,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 98773844,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -3.1650035730341624
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 861491,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95743557,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.0679042925574507,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 853971,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95736037,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.075517644124491,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.00785431441616484
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 1378361,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 96260427,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 2.544617986113814,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.5398483367397766
+        }
+      ]
+    },
+    {
+      "parentSha256": "9f9464027f943b091885bbd200b3e17de946819dace0c0417defb3ccdfde5180",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 4439545,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 99321611,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -3.605401133588684
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 983217,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95865283,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.47993549963663,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 975697,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95857763,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.487506862932378,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.007844341313841425
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 1560950,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 96443016,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 2.89825645296873,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.6026509096103122
+        }
+      ]
+    },
+    {
+      "parentSha256": "9662d345cb9f90c47aa3ae88f6661a8d94b8dfaf123b53dd23feba3da6a05fa8",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 3032800,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 97914866,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -2.4721370170356196
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 670607,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95552673,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 2.4124967908346013,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 663087,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95545153,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 2.4201769320707642,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.00787000485062307
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 1092035,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95974101,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 1.9820943226332965,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.441042606939944
+        }
+      ]
+    },
+    {
+      "parentSha256": "764dc48b0c3cdc59e696be3000ff2e897cb59419d208485e92002f958736b09e",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 1806460,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 96688526,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -1.4781388942563936
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 398087,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95280153,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 1.4566082018873676,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 390567,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95272633,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 1.4643857534864064,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.007892514614245004
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 683255,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95565321,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 1.161673516462543,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.29929422972274194
+        }
+      ]
+    },
+    {
+      "parentSha256": "e633fd85ca9ae626af91325fc9003d38e1bf318b1d14edf83cb70a1763e81c40",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 2599324,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 97481390,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -2.121435720171352
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 574279,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95456345,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 2.077365741296877,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 566759,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95448825,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 2.08508003425064,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.00787794672004255
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 947543,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95829609,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 1.6944577831727676,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.39103110432313326
+        }
+      ]
+    },
+    {
+      "parentSha256": "fc15630ff50a00810be0781c6830905bdd60ac3e124ad2040b400d8ccba929d5",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 4255630,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 99137696,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -3.4576606276732424
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 942347,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95824413,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.3421020799192265,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 934827,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95816893,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.349687489206931,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.007847686998093064
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 1499645,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 96381711,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 2.779956677629466,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.5815824825350091
+        }
+      ]
+    },
+    {
+      "parentSha256": "97a92f99f36d5409692d9ef9b0fbeee6b18470798a8eb695c77a64f58285974b",
+      "rows": [
+        {
+          "variant": "individual-full",
+          "parentBytes": 4591240,
+          "parentRequests": 9,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 99473306,
+          "totalRequests": 230,
+          "totalBytesSavedPercent": 0,
+          "totalRequestsSavedPercent": 0,
+          "bytesSavedAgainstAlreadyBatchedPercent": -3.727164267512173
+        },
+        {
+          "variant": "batched-full",
+          "parentBytes": 1016927,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95898993,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.5932383709052558,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0
+        },
+        {
+          "variant": "grouped-compact",
+          "parentBytes": 1009407,
+          "parentRequests": 2,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 95891473,
+          "totalRequests": 223,
+          "totalBytesSavedPercent": 3.6007981880083486,
+          "totalRequestsSavedPercent": 3.0434782608695654,
+          "bytesSavedAgainstAlreadyBatchedPercent": 0.00784158390484872
+        },
+        {
+          "variant": "grouped-read-all",
+          "parentBytes": 1611515,
+          "parentRequests": 3,
+          "workerBytes": 94882066,
+          "workerRequests": 221,
+          "totalBytes": 96493581,
+          "totalRequests": 224,
+          "totalBytesSavedPercent": 2.995502129988522,
+          "totalRequestsSavedPercent": 2.608695652173913,
+          "bytesSavedAgainstAlreadyBatchedPercent": -0.6200148525021529
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "sha256": "48dcae6fe4328b10afa7ce76e8d153ad9dd5f9742094ad3ce00fd5b16743b6b2",
+      "bytes": 3382307,
+      "boundaryIds": [
+        "1817b4e0"
+      ]
+    },
+    {
+      "sha256": "b21a00c5b52549761902f4619cfdbd6a274d647daf4810d50c0afb92db2f9f1b",
+      "bytes": 3653539,
+      "boundaryIds": [
+        "b82256bf"
+      ]
+    },
+    {
+      "sha256": "9f9464027f943b091885bbd200b3e17de946819dace0c0417defb3ccdfde5180",
+      "bytes": 1990901,
+      "boundaryIds": [
+        "51ae1a64"
+      ]
+    },
+    {
+      "sha256": "9662d345cb9f90c47aa3ae88f6661a8d94b8dfaf123b53dd23feba3da6a05fa8",
+      "bytes": 7575961,
+      "boundaryIds": [
+        "7e8d6879"
+      ]
+    },
+    {
+      "sha256": "764dc48b0c3cdc59e696be3000ff2e897cb59419d208485e92002f958736b09e",
+      "bytes": 6405763,
+      "boundaryIds": [
+        "cb31b68e"
+      ]
+    },
+    {
+      "sha256": "e633fd85ca9ae626af91325fc9003d38e1bf318b1d14edf83cb70a1763e81c40",
+      "bytes": 3949283,
+      "boundaryIds": [
+        "cbcb0064"
+      ]
+    },
+    {
+      "sha256": "fc15630ff50a00810be0781c6830905bdd60ac3e124ad2040b400d8ccba929d5",
+      "bytes": 3442640,
+      "boundaryIds": [
+        "e1de4761"
+      ]
+    },
+    {
+      "sha256": "97a92f99f36d5409692d9ef9b0fbeee6b18470798a8eb695c77a64f58285974b",
+      "bytes": 784242,
+      "boundaryIds": [
+        "aca52ed5"
+      ]
+    }
+  ],
+  "workerSourceHashes": [
+    "02a6baf608fd7631420a52335b84325e794afa5c5cf3bbdf25c072464cf4607f",
+    "0021044aaaaf4b8d2a4e4fc312cb2ef6e81ff0e4f3c530b913e92871b0a29cee",
+    "b18801441e423ebce0debea02d6846e8a9244f6bf43484f652d52dbd13c9aee2",
+    "3a6fdfc760269158cdd23517594ee67a2e3784a1a5042e8838c4bc19aa48992d",
+    "d3846c7523ff39b391d1a6ec694a1c49272fb15196a44a37652b2b850f75bb15",
+    "5463f53cec3e4ea2b87dddc2f821c085d76f8c544e1d38e860fa58d2935fd84d",
+    "abe0de8c4ce0179df7db83452558329ab19efb3ad20fd4997551f81c3eb36b6e",
+    "e29763113b4bfe35919ff3c1bb9574bd2d4d4e5d11fd49263858a6e872420842"
+  ],
+  "workerReportedUsage": {
+    "input": 34630380,
+    "output": 203907,
+    "total": 34834287
+  },
+  "workerRequests": 221,
+  "workerBytes": 94882066,
+  "newProviderCalls": 0,
+  "scope": [
+    "Four scripted coordination policies on identical saved contexts. Recorded worker work is identical and included in every policy, with its complete selected run reconstructed and counted once per scenario.",
+    "The recorded worker responses must match transcript assistant boundaries exactly; missing accounting fails the benchmark. Provider-internal retries or unrecorded failed attempts are unavailable.",
+    "Actual OpenAI-completions serialization with a stub fetch, fixed seven-tool declarations and current Pi reference projection. Historic configuration/tool registries are not fully reconstructable.",
+    "Individual-full assumes one model turn between each final worker wait. Batched-full is the stronger existing single-call Bash baseline. Grouped-read-all charges an extra call and full artifact retransmission when summaries are insufficient.",
+    "Worker input/output/total are provider-reported values. Cache categories absent from old logs remain unspecified. Byte counts are replay request bodies, not live token rate, compressed network bytes, model-choice frequency or task-quality evidence.",
+    "No benefit is attributed to shorter briefs or changing worker behavior; worker traffic is held fixed. This experiment does not estimate the prevalence of avoidable polling in production."
+  ]
+}

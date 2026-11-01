@@ -1,0 +1,2819 @@
+#!/usr/bin/env python3
+"""pi-task: hand subtasks to Qwen in pi sessions you can watch, and talk to them like a user.
+
+Each session is one pi conversation. Its pi TUI runs in a tmux session, so it
+keeps working when the calling command times out or exits, and when its window
+closes. `new` opens a gnome-terminal window "pi-task: NAME" on that TUI;
+--hidden skips it and `show NAME` opens one later. A pi extension
+(pi-task-extension.ts) is the control channel: it takes prompts, follow-ups,
+interrupts and stops from a queue, and records state, answers and token usage.
+A follow-up sent while pi works reaches it after the current tool calls, the
+way a steering message typed in the TUI does; --after holds it until pi has
+finished. Default model: qwen3.8-flash-next when served, else pi's default,
+else another served Qwen model. A served model asked for explicitly wins.
+Default thinking: the
+highest level the model maps.
+
+commands:
+  new [opts] PROMPT          start a session, wait, print the answer
+  send NAME [opts] TEXT      send a follow-up, wait, print the answer
+  wait NAME                  wait until the session is idle, print the answer
+                             to the last message
+  wait-many NAME [NAME ...] --timeout SEC --json [--reply-chars N] [--output FILE]
+                             observe up to 32 frozen messages locally; stop waiting
+                             when all settle, one fails, or the deadline expires
+  result NAME                print the answer to the last message, no waiting
+  status NAME | list | log NAME [-f]
+                             inspect a session and read what it did
+  interrupt NAME             stop the current run, like Esc; the session stays
+  stop NAME [--force]        drop queued messages, end pi, close its windows
+  set NAME [-m M] [-e E]     change model or thinking level, at once
+  compact NAME [FOCUS]       compact the conversation
+  show NAME | hide NAME      open a window on the session, or close its windows
+  attach NAME                watch and type in this terminal (tmux attach)
+  models [--json]            list the models the providers serve now
+  models --wait [--interval SEC] [--timeout SEC]
+                             like models, but probe every --interval seconds
+                             (default 60) until a Qwen model is served, then
+                             print and exit 0; if --timeout runs out first,
+                             exit 4
+  rm NAME...                 forget sessions (pi's session files stay)
+  recover [--dry-run] [NAME...]
+                             restart the sessions that a crash or reboot cut
+  cap [N] [-m MODEL] [--json] show each model's cap and use; N sets the default
+                             cap, or MODEL's own cap with -m
+  with-slot --model MODEL --name LABEL -- COMMAND [ARG...]
+                             run one external caller under the same cap/FIFO;
+                             no provider probe, inherited stdio, command status
+
+Text comes from the arguments, from -f FILE, or from stdin. Use stdin for long
+or quoted text:
+  pi-task new -C ~/repo <<'EOF'
+  Find why test_foo fails. Report the root cause with file:line.
+  EOF
+
+waiting:
+  new, send, wait and compact block until pi is idle: no run, no compaction,
+  no queued message. The answer, pi's last message of the run, goes to stdout.
+  The session name and one status line go to stderr. --bg returns at once (new
+  then prints the name). --timeout SEC stops waiting after SEC seconds and
+  exits 3; the session keeps working and `pi-task wait NAME` picks it up.
+  Agents whose shell tool has a time limit: pass --timeout below it.
+
+availability:
+  new, send, set and recover first ask each provider in ~/.pi/agent/models.json
+  for its /v1/models (PI_TASK_PROBE_TIMEOUT, default 3 s). When no Qwen model
+  is served they exit 4 with one line on stderr: fall back to claude-task.
+  models --wait probes on that schedule until a Qwen model is served, then
+  prints what models prints and exits 0; run it in the background to be told
+  when Qwen is back. --timeout SEC (default: forever) ends it with exit 4.
+
+the cap on sessions in use:
+  At most CAP sessions per model are in use on this PC, every caller's counted;
+  in use means a run or a compaction is on. CAP is in
+  ~/.local/state/pi-task/max-active (default 6); `cap N` sets the default for
+  every model without its own cap. `cap N -m MODEL` sets a model's cap.
+  The Kyiv schedule sets 6 by day (08:00–17:45), 12 at night; qwen3.8-flash-next
+  gets 33 around the clock. `cap` shows both caps and each model's use.
+  A message that would start a run on an idle session (new, send, recover) and
+  a compaction wait in the queue for a free slot, first come first served
+  within its model. list and status show such a session as waiting, with "K of
+  CAP in use"; new, send, compact and wait keep waiting, and --timeout exits 3
+  as before. Steers and follow-ups to a session in use go in at once;
+  interrupt drops a message that waits. A run typed in pi's window counts
+  too. Before a message or a compaction, pi-task restarts an idle pi whose
+  extension predates the cap, on the same conversation.
+
+exit status (session commands): 0 done, 1 error, the run ended in an error, or Qwen gave no answer,
+  2 usage error, 3 still working, 4 no Qwen model is served.
+  with-slot returns its command's exit status, or 128 + signal on cancellation.
+
+notes:
+  - Every session is told in its system prompt that it is a delegated session,
+    which overrides the delegation advice in AGENTS.md and CLAUDE.md.
+  - Sessions run with all of pi's tools and no approval prompts. A folder under
+    ~/Documents/Projects (PI_TASK_TRUSTED_ROOTS) gets --approve, so pi loads its
+    .pi resources; elsewhere --no-approve, so pi never stops at a trust question.
+  - Slash commands are TUI commands; pi-task sends text. `send NAME /compact`
+    compacts; use `set` for the model and thinking level.
+  - NAME may be a unique prefix, the pi session ID, or "last".
+  - PI_TASK_MODEL sets the default when qwen3.8-flash-next is unavailable;
+    PI_TASK_HIDDEN=1 makes --hidden the default.
+  - State: ~/.local/state/pi-task. Conversations: ~/.pi/agent/sessions.
+    tmux: `tmux -L pi-task ls`.
+"""
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+# concurrent.futures, urllib, secrets and uuid are imported where they are used: the extension
+# runs `pi-task _slot` at every run's start and end, and they would double its start-up time.
+
+PROG = "pi-task"
+HOME = Path.home()
+STATE_DIR = Path(os.environ.get("PI_TASK_HOME")
+                 or Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / PROG)
+SESSIONS = STATE_DIR / "sessions"
+PI_AGENT_DIR = Path(os.environ.get("PI_CODING_AGENT_DIR") or HOME / ".pi" / "agent").expanduser()
+EXTENSION = Path(os.environ.get("PI_TASK_EXTENSION")
+                 or Path(os.path.realpath(__file__)).with_name("pi-task-extension.ts"))
+TMUX_SOCKET = os.environ.get("PI_TASK_TMUX_SOCKET") or PROG
+TRUSTED_ROOTS = [Path(p).expanduser().resolve() for p in
+                 (os.environ.get("PI_TASK_TRUSTED_ROOTS") or "~/Documents/Projects").split(":") if p]
+DEFAULT_MODEL = os.environ.get("PI_TASK_MODEL") or None
+PREFERRED_MODEL = "qwen3.8-flash-next"
+HIDDEN_DEFAULT = os.environ.get("PI_TASK_HIDDEN") == "1"
+PROBE_TIMEOUT = float(os.environ.get("PI_TASK_PROBE_TIMEOUT") or 3)
+
+LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+EXIT_UNAVAILABLE = 4
+
+START_GRACE = 20.0   # seconds pi may take to start before queued messages count as left behind
+# Seconds pi may show no progress before its extension starts; tests make it shorter.
+EXT_START_TIMEOUT = float(os.environ.get("PI_TASK_EXT_START_TIMEOUT") or 60)
+CPU_STEP = 0.1       # CPU seconds between two liveness checks that count as progress; idle pi uses ~0.02
+TICK = 0.3
+
+# The cap on sessions in use, that is with a run or a compaction on. Every caller reads the cap
+# from CAP_FILE; slots.json, guarded by a flock on slots.lock, holds who has a slot and who waits.
+CAP_FILE = STATE_DIR / "max-active"
+MODEL_CAPS_NAME = "model-caps.json"
+ALL_MODELS = object()  # None denotes sessions whose model is unknown, not all models.
+SLOTS_FILE = STATE_DIR / "slots.json"
+SLOTS_LOCK = STATE_DIR / "slots.lock"
+DEFAULT_CAP = 6
+EXT_PROTOCOL = 2       # pi-task-extension.ts's PROTOCOL; from 2 on it waits for a slot before a run
+WAITER_STALE = 30.0    # seconds a waiting extension may go without asking before it loses its turn
+RENEW_TIMEOUT = 30.0   # seconds an idle pi with an older extension may take to quit for its restart
+EXTERNAL_SLOT = "@external:"   # cannot collide with a session's NAME_RE namespace
+
+# Variables a Claude Code or Codex session sets for the commands it runs. pi and the
+# commands it runs would act as part of that session if they inherited them.
+PARENT_ENV = {
+    "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_EMIT_STARTUP_TIMING",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "CLAUDE_CODE_ENABLE_TASKS",
+    "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT", "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_EFFORT",
+    "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "AI_AGENT", "MCP_CONNECTION_NONBLOCKING",
+    "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_CI", "PI_CODING_AGENT", "PI_SESSION_ID",
+    "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL", "TMUX", "TMUX_PANE",
+}
+
+# pi loads AGENTS.md and CLAUDE.md, which may tell it to hand subtasks to claude-task or
+# Codex-task sessions. This tells a session that it is the delegated one, so sessions nest
+# only when a task asks, and how to keep its work when a crash or reboot stops it.
+DELEGATED_PROMPT = ("pi-task started this session as a delegated session named {name}. Another agent or a "
+                    "person sends your messages through pi-task and reads only your last message of each run, "
+                    "so end every run with a message that answers them. Do the task yourself. Advice in "
+                    "AGENTS.md or CLAUDE.md to hand subtasks to other agents (claude-task, Codex-task, pi-task "
+                    "or subagents) is for the coordinator, not for you: start no such sessions unless your task "
+                    "asks you to.\n\n"
+                    "A crash or reboot can stop this session at any time, so unless your task says otherwise: "
+                    "write results, logs and reports straight to their final destination, and never keep work "
+                    "only in /tmp. Commit after each step; if you work in a clone, fetch its branch into the repo "
+                    "it was cloned from after each commit. After each step, update the progress doc (your task's, "
+                    "or one beside your results): what is done, what runs, and how to resume. Start long runs "
+                    "detached, with their log in the final folder.")
+
+# What `recover` tells a session whose work a crash or reboot cut.
+RESUME_PROMPT = ("pi-task recover: a crash or reboot stopped this session before its work was done. The "
+                 "machine booted at {boot}. Processes started before then are gone, and /tmp may have been "
+                 "wiped. Check your progress doc, files, branches and runs, then continue the task.")
+RESENT_NOTE = " Messages sent to you before it that may not have reached you follow this one; skip any you already handled."
+
+# pi-task's own tmux server (tmux -L pi-task) reads this, not the user's tmux.conf, whose
+# destroy-unattached would end a session when its window closes.
+TMUX_CONF = """\
+# pi-task's tmux server (tmux -L pi-task). pi-task writes this file; edits are overwritten.
+set -g default-terminal tmux-256color
+set -as terminal-features ',xterm*:256:RGB'
+set -s extended-keys on
+set -s escape-time 10
+set -g history-limit 50000
+set -g destroy-unattached off
+set -g remain-on-exit on
+set -g remain-on-exit-format "pi exited (#{?pane_dead_signal,signal #{pane_dead_signal},status #{pane_dead_status}}). See: pi-task status #{@pitask_name}"
+set -g prefix None
+set -g mouse on
+set -g set-titles on
+set -g set-titles-string "pi-task: #{?@pitask_name,#{@pitask_name},#{session_name}}"
+set -g window-size latest
+set -g status on
+set -g status-style "bg=colour236,fg=colour250"
+set -g status-left-length 60
+set -g status-left " pi-task: #{?@pitask_name,#{@pitask_name},#{session_name}} "
+set -g status-right "closing this window leaves pi running "
+set -g window-status-format ""
+set -g window-status-current-format ""
+"""
+
+
+# ---------------------------------------------------------------- helpers
+
+def die(msg, code=1):
+    print(f"{PROG}: {msg}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def say(msg, quiet=False):
+    """A status line for the caller, on stderr."""
+    if not quiet:
+        print(f"[{PROG}] {msg}", file=sys.stderr, flush=True)
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, data):
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def append_log(path, ev, **data):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(ev=ev, ts=time.time(), **data), ensure_ascii=False) + "\n")
+
+
+def short(text, n=200):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def fmt_dur(sec):
+    sec = int(sec or 0)
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m"
+
+
+def fmt_tokens(n):
+    if not n:
+        return "?"
+    if n < 1000:
+        return str(n)
+    return f"{n / 1e6:.2f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e4 else f"{n / 1e3:.1f}k"
+
+
+def fmt_time(ts):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
+
+
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+class Flock:
+    """An exclusive flock on a file, held for the with-block."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)
+
+
+class Tail:
+    """Reads the JSON lines appended to a file since the last call."""
+
+    def __init__(self, path, pos=0):
+        self.path, self.pos, self.buf = path, pos, b""
+
+    def lines(self):
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.pos)
+                data = f.read()
+        except FileNotFoundError:
+            return []
+        self.pos += len(data)
+        self.buf += data
+        *done, self.buf = self.buf.split(b"\n")
+        out = []
+        for line in done:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return out
+
+
+def file_size(path):
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def caller():
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if any(k in os.environ for k in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_CI", "CODEX_SANDBOX")):
+        return "codex"
+    if os.environ.get("PI_CODING_AGENT"):
+        return "pi"
+    return "shell"
+
+
+def child_env():
+    return {k: v for k, v in os.environ.items() if k not in PARENT_ENV}
+
+
+def pi_bin(env=None):
+    """Resolve the managed selector for this launch, never a saved release pin."""
+    env = os.environ if env is None else env
+    agent = Path(env.get("PI_CODING_AGENT_DIR") or HOME / ".pi" / "agent").expanduser()
+    install = agent / "install"
+    selector = install / "current-version"
+    if install.exists():
+        try:
+            version = selector.read_text().strip()
+            if not version or version in (".", "..") or "/" in version or "\\" in version:
+                return None
+            release = (install / "releases" / version).resolve()
+            exe = release / "node_modules" / ".bin" / "pi"
+            package = release / "node_modules" / "@earendil-works" / "pi-coding-agent" / "package.json"
+            if not release.is_relative_to((install / "releases").resolve()) or read_json(package).get("version") != version or not exe.resolve().is_relative_to(release):
+                return None
+            return str(exe) if os.access(exe, os.X_OK) else None
+        except (OSError, ValueError, AttributeError, RuntimeError):
+            return None  # A broken selector must not silently launch an older override.
+    exe = env.get("PI_TASK_PI") or shutil.which("pi", path=env.get("PATH")) or str(HOME / ".local" / "bin" / "pi")
+    return exe if os.access(exe, os.X_OK) else None
+
+
+def is_command(text):
+    """True for a slash command such as /compact, false for a path such as /home/x."""
+    return re.match(r"/[A-Za-z][\w:.-]*(\s|$)", text) is not None
+
+
+def trusted(cwd):
+    cwd = Path(cwd).resolve()
+    return any(cwd == root or root in cwd.parents for root in TRUSTED_ROOTS)
+
+
+def boot_time():
+    """When the machine booted, as `uptime -s` prints it."""
+    try:
+        return subprocess.run(["uptime", "-s"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "an unknown time"
+
+
+# ---------------------------------------------------------------- models and availability
+
+class Unavailable(Exception):
+    """No suitable model is served now."""
+
+
+def pi_config():
+    """(providers, settings) from pi's models.json and settings.json."""
+    models = read_json(PI_AGENT_DIR / "models.json", {}) or {}
+    settings = read_json(PI_AGENT_DIR / "settings.json", {}) or {}
+    return models.get("providers") or {}, settings
+
+
+def secret(value):
+    """A models.json key or header value: $NAME or ${NAME}, !command, or the literal."""
+    if not isinstance(value, str) or not value:
+        return None
+    m = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", value)
+    if m:
+        return os.environ.get(m.group(1))
+    if value.startswith("!"):
+        try:
+            out = subprocess.run(value[1:], shell=True, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+            return out.stdout.strip() or None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    return value
+
+
+def probe(prov, timeout):
+    """(served model IDs, error) for one provider's /models endpoint."""
+    import urllib.error
+    import urllib.request
+    base = (prov.get("baseUrl") or "").rstrip("/")
+    if not base:
+        return None, "no baseUrl"
+    headers = {"Accept": "application/json"}
+    key = secret(prov.get("apiKey"))
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    for k, v in (prov.get("headers") or {}).items():
+        v = secret(v)
+        if v is not None:
+            headers[k] = v
+    try:
+        with urllib.request.urlopen(urllib.request.Request(base + "/models", headers=headers), timeout=timeout) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", None) or e
+        return None, short(str(reason), 80)
+    ids = [m.get("id") for m in (data.get("data") if isinstance(data, dict) else data) or []
+           if isinstance(m, dict) and m.get("id")]
+    return ids, None
+
+
+def configured():
+    """The providers with a baseUrl in models.json and their models, unprobed: (probes, settings)."""
+    providers, settings = pi_config()
+    out = []
+    for name, prov in providers.items():
+        if isinstance(prov, dict) and prov.get("baseUrl"):
+            models = {m.get("id"): m for m in prov.get("models") or [] if isinstance(m, dict) and m.get("id")}
+            out.append({"provider": name, "url": prov["baseUrl"], "error": None, "served": [],
+                        "configured": models, "config": prov})
+    return out, settings
+
+
+def availability(timeout=None):
+    """What each configured provider serves now, probed in parallel: (probes, settings)."""
+    from concurrent.futures import ThreadPoolExecutor
+    probes, settings = configured()
+    timeout = PROBE_TIMEOUT if timeout is None else timeout
+    with ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
+        results = list(pool.map(lambda p: probe(p["config"], timeout), probes))
+    for p, (ids, err) in zip(probes, results):
+        p["served"], p["error"] = ids or [], err
+    return probes, settings
+
+
+def model_levels(cfg):
+    """The thinking levels pi offers for a model, lowest first, as pi-ai's
+    getSupportedThinkingLevels decides: a level mapped to null is out, and xhigh and
+    max are in only when mapped."""
+    cfg = cfg or {}
+    if not cfg.get("reasoning"):
+        return ["off"]
+    tmap = cfg.get("thinkingLevelMap") if isinstance(cfg.get("thinkingLevelMap"), dict) else {}
+    levels = [lv for lv in LEVELS if not (lv in tmap and tmap[lv] is None)
+              and (lv not in ("xhigh", "max") or tmap.get(lv) is not None)]
+    return levels or ["off"]
+
+
+def find_model(want, probes, settings):
+    """(provider, id, cfg) of the configured model `want` names, or None. `want` may be
+    provider/id, an ID, or a unique part of an ID; the default provider wins a tie."""
+    if "/" in want:
+        prov, mid = want.split("/", 1)
+        for p in probes:
+            if p["provider"] == prov and mid in p["configured"]:
+                return prov, mid, p["configured"][mid]
+        return None
+    order = sorted(probes, key=lambda p: p["provider"] != settings.get("defaultProvider"))
+    for test in (lambda m: m == want, lambda m: m.lower() == want.lower(), lambda m: want.lower() in m.lower()):
+        hits = [(p["provider"], m, cfg) for p in order for m, cfg in p["configured"].items() if test(m)]
+        ids = {m for _, m, _ in hits}
+        if len(ids) == 1 or (hits and hits[0][1] == want):
+            return hits[0]
+        if len(ids) > 1:
+            die(f"model {want!r} matches several: {', '.join(sorted(ids))}", 2)
+    return None
+
+
+def served(probes, prov, mid):
+    return any(p["provider"] == prov and mid in p["served"] for p in probes)
+
+
+def choose_model(want=None, timeout=None):
+    """Pick the model a session runs: (provider, id, cfg, note). The requested model if served,
+    else the preferred Qwen, pi's default, then another served Qwen. Raises Unavailable.
+    Probe only the providers needed to establish that choice."""
+    from concurrent.futures import ThreadPoolExecutor
+    probes, settings = configured()
+    if not probes:
+        raise Unavailable(f"no provider with a baseUrl in {PI_AGENT_DIR / 'models.json'}")
+    timeout = PROBE_TIMEOUT if timeout is None else timeout
+    asked = find_model(want, probes, settings) if want else None
+    if want and not asked:
+        names = sorted(f"{p['provider']}/{m}" for p in probes for m in p["configured"])
+        die(f"model {want!r} is not in {PI_AGENT_DIR / 'models.json'}; configured: {', '.join(names) or 'none'}", 2)
+    dprov, did = settings.get("defaultProvider"), settings.get("defaultModel")
+    default = find_model(f"{dprov}/{did}", probes, settings) if dprov and did else None
+
+    def ask_providers(candidates):
+        rest = [p for p in candidates if not p.get("probed")]
+        with ThreadPoolExecutor(max_workers=max(1, len(rest))) as pool:
+            for p, (ids, err) in zip(rest, pool.map(lambda p: probe(p["config"], timeout), rest)):
+                p["served"], p["error"], p["probed"] = ids or [], err, True
+
+    if asked:
+        ask_providers([p for p in probes if p["provider"] == asked[0]])
+        if served(probes, asked[0], asked[1]):
+            return (*asked, None)
+    missing = f"{asked[0]}/{asked[1]} is not served" if asked else None
+    preferred = sorted([p for p in probes if PREFERRED_MODEL in p["configured"]],
+                       key=lambda p: p["provider"] != dprov)
+    ask_providers(preferred)
+    for p in preferred:
+        if PREFERRED_MODEL in p["served"]:
+            note = f"{missing}; using {p['provider']}/{PREFERRED_MODEL}" if missing else None
+            return p["provider"], PREFERRED_MODEL, p["configured"][PREFERRED_MODEL], note
+    if not want and DEFAULT_MODEL:
+        return choose_model(DEFAULT_MODEL, timeout)
+    if default:
+        ask_providers([p for p in probes if p["provider"] == default[0]])
+    if default and default != asked and served(probes, default[0], default[1]):
+        return (*default, f"{missing}; using pi's default {default[0]}/{default[1]}" if missing else None)
+    ask_providers(probes)
+    for p in sorted(probes, key=lambda p: p["provider"] != dprov):
+        for mid in p["served"]:
+            if mid in p["configured"] and "qwen" in mid.lower():
+                why = missing or (f"pi's default {dprov}/{did} is not served" if default else "no model asked for")
+                return p["provider"], mid, p["configured"][mid], f"{why}; using {p['provider']}/{mid}"
+    states = "; ".join(f"{p['provider']} " + (f"unreachable ({p['error']})" if p["error"] else
+                                              "serves " + (", ".join(p["served"]) or "nothing"))
+                       for p in probes)
+    hint = " (the Codex sandbox blocks the network)" if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") else ""
+    raise Unavailable(f"no Qwen model from models.json is served now{hint}: {states}. Use claude-task instead.")
+
+
+def pick_model(want=None):
+    """choose_model, or exit 4 with one line."""
+    try:
+        return choose_model(want)
+    except Unavailable as e:
+        die(str(e), EXIT_UNAVAILABLE)
+
+
+def check_thinking(level, cfg, model):
+    levels = model_levels(cfg)
+    if level is None:
+        return levels[-1]
+    if level not in LEVELS:
+        die(f"thinking must be one of: {', '.join(LEVELS)}", 2)
+    if level not in levels:
+        die(f"{model} maps only these thinking levels: {', '.join(levels)}", 2)
+    return level
+
+
+# ---------------------------------------------------------------- tmux and windows
+
+def tmux_conf():
+    """The config file for pi-task's tmux server, written when it differs; None when it cannot be."""
+    path = STATE_DIR / "tmux.conf"
+    if read_text(path) != TMUX_CONF:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".tmux.conf.{os.getpid()}.tmp")
+            tmp.write_text(TMUX_CONF, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            return None              # read-only, as in the Codex sandbox: only a new server needs it
+    return path
+
+
+def read_text(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def tmux(*args, check=False):
+    exe = shutil.which("tmux") or die("tmux is not installed")
+    conf = tmux_conf()
+    out = subprocess.run([exe, "-L", TMUX_SOCKET, *(["-f", str(conf)] if conf else []), *args], capture_output=True,
+                         text=True, env=child_env(), stdin=subprocess.DEVNULL)
+    if check and out.returncode:
+        die(f"tmux {args[0]} failed: {out.stderr.strip() or out.stdout.strip()}")
+    return out
+
+
+def panes():
+    """{tmux session: {"dead", "pid", "status"}} for every pi-task tmux session, or None when
+    tmux runs but cannot be asked, as when a sandbox blocks its socket."""
+    out = tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}")
+    if out.returncode:
+        sock = Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}" / TMUX_SOCKET
+        gone = re.search(r"no server running|Connection refused|No such file", out.stderr)
+        return None if sock.exists() and not gone else {}
+    found = {}
+    for line in out.stdout.splitlines():
+        name, dead, pid, status = (line.split("\t") + ["", "", ""])[:4]
+        found.setdefault(name, {"dead": dead == "1", "pid": int(pid) if pid.isdigit() else None,
+                                "status": int(status) if status.lstrip("-").isdigit() else None})
+    return found
+
+
+def tmux_name(name):
+    return name.replace(".", "_").replace(":", "_")
+
+
+def desktop_env():
+    """DISPLAY, WAYLAND_DISPLAY and the session bus of the user's desktop, from gnome-shell's environment."""
+    for proc in Path("/proc").iterdir():
+        try:
+            if not proc.name.isdigit() or proc.stat().st_uid != os.getuid() \
+                    or (proc / "comm").read_text().strip() != "gnome-shell":
+                continue
+            env = dict(kv.split("=", 1) for kv in (proc / "environ").read_bytes().decode(errors="replace").split("\0")
+                       if "=" in kv)
+        except OSError:
+            continue
+        return {k: env[k] for k in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS") if env.get(k)}
+    return {}
+
+
+def display_env():
+    """The environment for a window on the user's desktop, or None when there is none."""
+    env = child_env()
+    # The tab id of the terminal that started the caller. Once that tab closes, gnome-terminal
+    # refuses every new window ("Failed to get screen from object path").
+    env.pop("GNOME_TERMINAL_SCREEN", None)
+    if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env.update(desktop_env())
+    if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        xs = sorted(Path("/tmp/.X11-unix").glob("X*"))
+        if xs:
+            env["DISPLAY"] = ":" + xs[0].name[1:]
+    if not env.get("DBUS_SESSION_BUS_ADDRESS"):
+        bus = Path(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "bus"
+        if bus.exists():
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") or not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        return None
+    return env
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        # A zombie has exited; its parent has not reaped it yet. tmux 3.4 leaves pi killed with
+        # SIGKILL a zombie for seconds or more.
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+    except (OSError, IndexError):
+        return True
+
+
+# ---------------------------------------------------------------- sessions
+
+ASK = object()   # "ask tmux", as the default of arguments that take what tmux said
+
+class Session:
+    def __init__(self, name):
+        self.name = name
+        self.dir = SESSIONS / name
+        self.queue_dir = self.dir / "queue"
+        self.sent_dir = self.dir / "sent"     # messages handed to pi that its conversation may not hold yet
+        self.meta_path = self.dir / "meta.json"
+        self.state_path = self.dir / "state.json"   # written by the extension
+        self.log_path = self.dir / "log.jsonl"
+
+    def meta(self):
+        return read_json(self.meta_path, {})
+
+    def state(self):
+        return read_json(self.state_path, {})
+
+    def lock(self):
+        """Guards the queue and meta.json."""
+        return Flock(self.dir / "queue.lock")
+
+    def start_lock(self):
+        """Held while a command restarts pi, queues an item and starts pi, so that two callers
+        never both restart it, and a restart's stop never drops another caller's item."""
+        return Flock(self.dir / "start.lock")
+
+    @property
+    def tmux(self):
+        return self.meta().get("tmux") or tmux_name(self.name)
+
+    def pane(self, all_panes=ASK):
+        """The session's tmux pane, from `all_panes` (default: ask tmux). When tmux cannot be
+        asked, pi's process from state.json stands in for it."""
+        all_panes = panes() if all_panes is ASK else all_panes
+        if all_panes is None:
+            st = self.state()
+            pid = st.get("pid")
+            return {"dead": False, "pid": pid, "status": None} if pid and not st.get("stopped") and pid_alive(pid) \
+                else None
+        return all_panes.get(self.tmux)
+
+    def alive(self, all_panes=ASK):
+        """pi runs: its tmux pane lives. pi is the pane's process."""
+        p = self.pane(all_panes)
+        return bool(p and not p["dead"])
+
+    def queued(self, folder=None):
+        """(path, item) for each item in queue/, or in another folder of items such as sent/."""
+        items = []
+        for path in sorted((folder or self.queue_dir).glob("[0-9]*.json")):
+            item = read_json(path)
+            if item is not None:
+                items.append((path, item))
+        return items
+
+    def messages_waiting(self):
+        return [item for _, item in self.queued() if item["kind"] in ("message", "compact")]
+
+    def enqueue(self, items, settings=None, only_if=None):
+        """Queue items for the extension. Controls, interrupts and stops are skipped when pi
+        does not run: new settings are in meta.json and apply when it starts. only_if, if
+        given, is called under the lock; when it returns a false value, nothing is queued.
+        Returns the sequence numbers of the queued items."""
+        with self.lock():
+            if only_if and not only_if():
+                return []
+            meta = self.meta()
+            meta.update(settings or {})
+            alive = self.alive()
+            seqs = []
+            for item in items:
+                if item["kind"] not in ("message", "compact") and not alive:
+                    continue
+                seq = meta["next_seq"]
+                meta["next_seq"] = seq + 1
+                if item["kind"] in ("message", "compact"):
+                    meta["last_msg"] = seq
+                write_json(self.queue_dir / f"{seq:08d}.json", dict(item, seq=seq, ts=time.time()))
+                seqs.append(seq)
+            meta["updated"] = time.time()
+            write_json(self.meta_path, meta)
+        return seqs
+
+    def launch(self, window=None, quiet=False):
+        """Start pi in the session's tmux session unless it runs. Opens a window unless the
+        session is hidden. Returns True if it started pi. When it starts pi for a queued message
+        or compaction, the session's place in line for a Qwen slot is held while pi starts."""
+        meta = self.meta()
+        pane = self.pane()
+        started = False
+        if not pane or pane["dead"]:
+            # Logged first, so the extension's start event always comes after it.
+            append_log(self.log_path, "launch")
+            env_file = self.dir / "env.json"
+            fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(child_env(), f)
+            cmd = [sys.executable, os.path.realpath(__file__), "_exec", self.name]
+            env = ["-e", f"PI_TASK_DIR={self.dir}", "-e", f"PI_TASK_NAME={self.name}"]
+            if pane:
+                tmux("respawn-pane", "-k", "-t", f"={self.tmux}:", "-c", meta["cwd"], *env, "--", *cmd, check=True)
+            else:
+                tmux("new-session", "-d", "-s", self.tmux, "-x", "200", "-y", "50", "-c", meta["cwd"], *env,
+                     "--", *cmd, check=True)
+            # The item pi will start with, in the extension's order: recover's note first, then by seq.
+            first = min((item for _, item in self.queued() if item["kind"] in ("message", "compact")),
+                        key=lambda item: (not item.get("first"), item["seq"]), default=None)
+            if first:
+                slot_reserve(self.name, first.get("ts") or time.time())
+            tmux("set-option", "-t", f"={self.tmux}", "@pitask_name", self.name)
+            with self.lock():
+                meta = self.meta()
+                meta["launched"] = time.time()
+                write_json(self.meta_path, meta)
+            started = True
+        if window if window is not None else (started and not meta.get("hidden")):
+            self.open_window(quiet)
+        return started
+
+    def clients(self):
+        out = tmux("list-clients", "-t", f"={self.tmux}", "-F", "#{client_pid}")
+        return [int(p) for p in out.stdout.split() if p.isdigit()] if out.returncode == 0 else []
+
+    def open_window(self, quiet=False):
+        """Open a gnome-terminal window attached to the session. Returns its client pid or None."""
+        term = shutil.which("gnome-terminal")
+        if not term:
+            say(f"{self.name}: no window: gnome-terminal is not installed; `{PROG} attach {self.name}` "
+                f"shows the session in a terminal", quiet)
+            return None
+        env = display_env()
+        if env is None:
+            say(f"{self.name}: no window: no display or session bus here; `{PROG} show {self.name}` "
+                f"opens one from the desktop", quiet)
+            return None
+        tmux_exe = shutil.which("tmux")
+        err = self.dir / "window.log"
+        before = set(self.clients())
+        with open(err, "ab") as errf:
+            proc = subprocess.Popen([term, "--wait", f"--title=pi-task: {self.name}", "--", tmux_exe, "-L",
+                                     TMUX_SOCKET, "attach-session", "-t", f"={self.tmux}"],
+                                    env=env, stdin=subprocess.DEVNULL, stdout=errf, stderr=errf,
+                                    start_new_session=True)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if set(self.clients()) - before:
+                break
+            if proc.poll() is not None:
+                say(f"{self.name}: the window did not open (gnome-terminal exited {proc.returncode}): "
+                    f"{short(read_text(err) or '', 300)}")
+                return None
+            time.sleep(0.1)
+        with self.lock():
+            meta = self.meta()
+            meta["window_pid"] = proc.pid
+            write_json(self.meta_path, meta)
+        return proc.pid
+
+    def close_windows(self):
+        """Detach every client: their windows close, the session keeps running."""
+        if self.clients():
+            tmux("detach-client", "-s", f"={self.tmux}")
+            return True
+        return False
+
+    def screen(self):
+        """What pi's pane shows now."""
+        out = tmux("capture-pane", "-p", "-t", f"={self.tmux}:")
+        return out.stdout if out.returncode == 0 else ""
+
+    def pane_tail(self, n=12):
+        out = tmux("capture-pane", "-p", "-t", f"={self.tmux}:", "-S", f"-{n * 3}")
+        lines = [line.rstrip() for line in out.stdout.splitlines() if line.strip()] if out.returncode == 0 else []
+        return "\n".join(lines[-n:])
+
+
+def all_sessions():
+    if not SESSIONS.is_dir():
+        return []
+    return [Session(d.name) for d in sorted(SESSIONS.iterdir()) if (d / "meta.json").exists()]
+
+
+def resolve(ref):
+    sessions = all_sessions()
+    if not sessions:
+        die("there are no sessions yet")
+    if ref == "last":
+        return max(sessions, key=last_active)
+    names = {s.name: s for s in sessions}
+    if ref in names:
+        return names[ref]
+    hits = [s for s in sessions if s.name.startswith(ref)]
+    if not hits:
+        hits = [s for s in sessions if (s.meta().get("pi_session_id") or "").startswith(ref)]
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        die(f"{ref!r} matches several sessions: {', '.join(s.name for s in hits)}")
+    die(f"no session matches {ref!r}; see `{PROG} list`")
+
+
+def last_active(sess):
+    return max(sess.meta().get("updated") or 0, sess.state().get("updated") or 0)
+
+
+def interruption(sess, st=None, alive=None):
+    """What a crash or reboot cut in this session, or None.
+
+    pi that ends normally records a clean shutdown, and `stop` drops what was queued."""
+    st = sess.state() if st is None else st
+    if sess.alive() if alive is None else alive:
+        return None
+    meta = sess.meta()
+    if time.time() - (meta.get("launched") or 0) < START_GRACE and (meta.get("launched") or 0) > (st.get("updated") or 0):
+        return None                  # launched a moment ago: pi is starting
+    queued = sess.messages_waiting()
+    since = st.get("updated") or 0
+    if any(item.get("ts", 0) > since and time.time() - item.get("ts", 0) < START_GRACE for item in queued):
+        return None                  # queued since pi last ran, a moment ago: a start is on its way
+    cut = []
+    # pi that shut down saved what it cut; pi that died left its live state behind.
+    was = st.get("cut") or (st if (st.get("busy") or st.get("compacting")) and not st.get("stopped") else {})
+    if was.get("compacting"):
+        cut.append("cut while compacting")
+    elif was.get("busy") or was.get("turn"):
+        cut.append("cut mid-run")
+    sent = len(sess.queued(sess.sent_dir))
+    if sent:
+        cut.append(plural(sent, "message") + " to send again")
+    if queued:
+        cut.append(plural(len(queued), "queued message"))
+    return ", ".join(cut) or None
+
+
+def describe_state(sess, st=None, alive=None, all_panes=ASK):
+    all_panes = panes() if all_panes is ASK else all_panes
+    st = sess.state() if st is None else st
+    alive = sess.alive(all_panes) if alive is None else alive
+    queued = bool(sess.messages_waiting())
+    if not alive:
+        if interruption(sess, st, alive):
+            return "interrupted"
+        if queued:
+            return "starting"
+        return "stopped"
+    pane = sess.pane(all_panes)
+    if not st.get("pid") or (pane and st.get("pid") != pane["pid"]) or st.get("stopped"):
+        return "starting"
+    if st.get("compacting"):
+        return "compacting"
+    if st.get("busy") or st.get("starting") or st.get("pending"):
+        return "working"
+    if queued and st.get("waiting"):
+        return "waiting"
+    if queued:
+        return "working"
+    return "error" if st.get("error") else "idle"
+
+
+# ---------------------------------------------------------------- the cap on sessions in use
+
+def model_id(model):
+    """Caps follow model IDs, shared across providers. None is the unknown-model pool."""
+    return model if isinstance(model, str) and model else None
+
+
+def read_model_caps():
+    """Explicit overrides; keep max-active as the default for every other model."""
+    path = CAP_FILE.with_name(MODEL_CAPS_NAME)
+    data = read_json(path)
+    if data is None and not path.exists():
+        return {}, None
+    if not isinstance(data, dict) or any(not isinstance(k, str) or not k or
+                                        type(v) is not int or v < 1 for k, v in data.items()):
+        return {}, f"{path} holds invalid model caps; using the default cap"
+    return data, None
+
+
+def read_cap(model=None):
+    """(cap, problem): the most sessions in use at once, from CAP_FILE. DEFAULT_CAP when the file
+    is missing, or does not hold a whole number from 1 up; problem then says so."""
+    caps, problem = read_model_caps()
+    if model_id(model) in caps:
+        return caps[model_id(model)], problem
+    text = read_text(CAP_FILE)
+    if text is None:
+        return DEFAULT_CAP, problem
+    try:
+        cap = int(text.strip())
+    except ValueError:
+        cap = 0
+    if cap < 1:
+        return DEFAULT_CAP, f"{CAP_FILE} holds {short(text, 20)!r}, not a whole number from 1 up; using {DEFAULT_CAP}"
+    return cap, problem
+
+
+def runs_pi(sess_dir, pid):
+    """True if process `pid` lives and is the pi that pi-task started for the session in
+    `sess_dir`: its environment names that folder in PI_TASK_DIR. A reused pid fails the test."""
+    if not pid_alive(pid):
+        return False
+    try:
+        env = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False             # gone meanwhile, or another user's process
+    for var in env.split(b"\0"):
+        if var.startswith(b"PI_TASK_DIR="):
+            value = os.fsdecode(var[len(b"PI_TASK_DIR="):])
+            return value == str(sess_dir) or os.path.realpath(value) == os.path.realpath(sess_dir)
+    return False
+
+
+def session_busy(st):
+    """The extension's snapshot says a run or a compaction is on, or a run is about to start."""
+    return bool(st.get("busy") or st.get("compacting") or st.get("starting") or st.get("pending"))
+
+
+def slots_read():
+    """The slot table: gen, holders {name: {pid, since, why}} and waiters {name: {pid, since, seen}}.
+    A holder's since is when it got its slot, a waiter's since when its item was queued."""
+    data = read_json(SLOTS_FILE, {})
+    data = data if isinstance(data, dict) else {}
+    return {"gen": int(data.get("gen") or 0), "holders": dict(data.get("holders") or {}),
+            "waiters": dict(data.get("waiters") or {})}
+
+
+def process_start(pid):
+    """Linux process identity, including zombies (which still pin their PID)."""
+    try:
+        return Path(f"/proc/{int(pid)}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, ValueError, TypeError, IndexError):
+        return None
+
+
+def external_alive(entry):
+    return bool(entry.get("start") and process_start(entry.get("pid")) == entry["start"]
+                and pid_alive(entry.get("pid")))
+
+
+def slots_prune(table, now):
+    """Drop the holders whose pi is gone or whose extension says it holds no slot (a release that
+    got lost), and the waiters whose pi is gone or that stopped asking. External leases use
+    their guardian's PID/start identity instead of session state. True if any went."""
+    gone = False
+    for name, h in list(table["holders"].items()):
+        if name.startswith(EXTERNAL_SLOT):
+            if not external_alive(h):
+                del table["holders"][name]
+                gone = True
+            continue
+        folder = SESSIONS / name
+        st = read_json(folder / "state.json", {}) or {}
+        lost = (st.get("pid") == h.get("pid") and (st.get("ext") or 0) >= EXT_PROTOCOL and not st.get("slot")
+                and (st.get("updated") or 0) > (h.get("since") or 0) + 1)
+        if lost or not runs_pi(folder, h.get("pid")):
+            del table["holders"][name]
+            gone = True
+    for name, w in list(table["waiters"].items()):
+        dead = (not external_alive(w) if name.startswith(EXTERNAL_SLOT) else
+                w.get("pid") is not None and not runs_pi(SESSIONS / name, w.get("pid")))
+        if now - (w.get("seen") or 0) > WAITER_STALE or dead:
+            del table["waiters"][name]
+            gone = True
+    return gone
+
+
+def slot_model(name, entry=None):
+    """Actual live model first, then metadata or the entry's saved model. Old entries need
+    no migration, and pending/failed model controls must not override a live pi's model."""
+    if name.startswith(EXTERNAL_SLOT):
+        return model_id((entry or {}).get("model"))
+    folder = SESSIONS / name
+    st = read_json(folder / "state.json", {}) or {}
+    if st.get("model") and not st.get("stopped") and (
+            not entry or entry.get("pid") is None or entry.get("pid") == st.get("pid")) and runs_pi(folder, st.get("pid")):
+        return model_id(st["model"])
+    meta = read_json(folder / "meta.json", {}) or {}
+    return model_id(meta.get("model")) or model_id((entry or {}).get("model"))
+
+
+def slot_users(table, model=ALL_MODELS):
+    """{name: what} for each session in use: the slot holders ("run" or "compact"), and the
+    sessions whose live pi works or compacts without a slot ("working" or "compacting"), as when
+    the user typed in its window or its extension predates the cap."""
+    users = {name: h.get("why") or "run" for name, h in table["holders"].items()}
+    try:
+        folders = list(SESSIONS.iterdir())
+    except OSError:
+        folders = []
+    for folder in folders:
+        if folder.name in users:
+            continue
+        st = read_json(folder / "state.json")
+        if isinstance(st, dict) and not st.get("stopped") and session_busy(st) and runs_pi(folder, st.get("pid")):
+            users[folder.name] = "compacting" if st.get("compacting") else "working"
+    if model is ALL_MODELS:
+        return users
+    return {n: why for n, why in users.items() if slot_model(n, table["holders"].get(n)) == model}
+
+
+def slots_line(table, model=ALL_MODELS):
+    """FIFO within each model; filtering never changes another caller's entry or timestamp."""
+    return [name for name, w in sorted(table["waiters"].items(), key=lambda kv: (kv[1].get("since") or 0, kv[0]))
+            if model is ALL_MODELS or slot_model(name, w) == model]
+
+
+def slot_ask(name, pid, since, why, *, lease=None):
+    """The extension of session `name`, pi `pid`, asks for a slot to start a run or a compaction
+    (`why`) for an item queued at `since`. It gets one when fewer than the cap are in use and no
+    waiter queued earlier is owed one of the free slots; else it keeps its place in line.
+    External guardians pass immutable start/model/label metadata in `lease`."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with Flock(SLOTS_LOCK):
+        now = time.time()
+        table = slots_read()
+        changed = slots_prune(table, now)
+        held = table["holders"].get(name)
+        model = slot_model(name, lease or held or table["waiters"].get(name))
+        cap, _ = read_cap(model)
+        users = slot_users(table, model)
+        position = None
+        if held and held.get("pid") == pid:
+            granted = True
+            if held.get("model") != model:
+                held["model"] = model
+                changed = True
+        else:
+            users.pop(name, None)
+            w = table["waiters"].get(name)
+            if not w or w.get("pid") != pid or w.get("since") != since:
+                changed = changed or w is not None      # it leaves its old place in line
+                w = table["waiters"][name] = {"pid": pid, "since": since, "model": model, **(lease or {})}
+            if w.get("model") != model:
+                w["model"] = model
+                changed = True
+            w["seen"] = now
+            position = slots_line(table, model).index(name)
+            granted = position < cap - len(users)
+            if granted:
+                del table["waiters"][name]
+                table["holders"][name] = {"pid": pid, "since": now, "why": why, "queued": since,
+                                           "model": model, **(lease or {})}
+                users[name] = why
+                changed = True
+        if changed:
+            table["gen"] += 1
+        write_json(SLOTS_FILE, table)
+    return {"granted": granted, "position": position, "in_use": len(users), "cap": cap, "gen": table["gen"], "model": model}
+
+
+def slot_reserve(name, since):
+    """pi-task has just started the pi of session `name` for an item queued at `since`: hold the
+    session's place in line until its extension asks, so that a session queued later whose pi
+    starts sooner does not pass it. A place no extension takes goes after WAITER_STALE."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with Flock(SLOTS_LOCK):
+        now = time.time()
+        table = slots_read()
+        changed = slots_prune(table, now)
+        if name not in table["holders"] and name not in table["waiters"]:
+            table["waiters"][name] = {"pid": None, "since": since, "seen": now, "model": slot_model(name)}
+            changed = True
+        if changed:
+            table["gen"] += 1
+            write_json(SLOTS_FILE, table)
+
+
+def slot_leave(name, pid, *, start=None):
+    """The extension of session `name`, pi `pid`, gives up its slot or its place in line."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with Flock(SLOTS_LOCK):
+        table = slots_read()
+        changed = slots_prune(table, time.time())
+        left = []
+        for part in ("holders", "waiters"):
+            entry = table[part].get(name)
+            if entry and entry.get("pid") == pid and (not name.startswith(EXTERNAL_SLOT) or
+                                                       entry.get("start") == start):
+                del table[part][name]
+                left.append(part)
+        if changed or left:
+            table["gen"] += 1
+            write_json(SLOTS_FILE, table)
+    return {"left": left, "gen": table["gen"]}
+
+
+def slot_view(model=ALL_MODELS):
+    """(cap, problem, users, line, table) as they stand, pruned but not written back: what cap,
+    list and status show."""
+    table = slots_read()
+    slots_prune(table, time.time())
+    cap, problem = read_cap(None if model is ALL_MODELS else model)
+    return cap, problem, slot_users(table, model), slots_line(table, model), table
+
+
+def ordinal(n):
+    return f"{n}" + ("th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+def waiting_note(name, users, line, cap):
+    """'K of CAP in use, Nth in line' for a waiting session."""
+    note = f"{len(users)} of {cap} in use"
+    return note + (f", {ordinal(line.index(name) + 1)} in line" if name in line else "")
+
+
+def old_extension(sess, st=None):
+    """True if the session's live pi runs an extension that predates the cap, which starts runs
+    without a slot."""
+    st = sess.state() if st is None else st
+    return not st.get("stopped") and (st.get("ext") or 0) < EXT_PROTOCOL and runs_pi(sess.dir, st.get("pid"))
+
+
+def renew(sess, quiet=False):
+    """Before a message or a compaction that may start a run: when the session's pi runs idle
+    with an extension that predates the cap, stop it as `stop` does and keep its tmux pane, so
+    the next launch starts it again on the same conversation with the current extension, and
+    its window stays. True if it stopped pi. A pi at work keeps running: what is sent to it goes
+    in as a steer or follow-up."""
+    pane = sess.pane()
+    if not pane or pane["dead"]:
+        return False
+    st = sess.state()
+    if st.get("pid") != pane["pid"] or st.get("stopped") or (st.get("ext") or 0) >= EXT_PROTOCOL:
+        return False             # pi is starting, with the current extension, or runs it
+    if session_busy(st) or sess.messages_waiting():
+        return False
+    [seq] = sess.enqueue([{"kind": "stop"}])
+    deadline = time.time() + RENEW_TIMEOUT
+    while time.time() < deadline and sess.alive():
+        time.sleep(TICK)
+    if sess.alive():
+        with sess.lock():            # a stop left behind would end the next pi at its start
+            (sess.queue_dir / f"{seq:08d}.json").unlink(missing_ok=True)
+        die(f"{sess.name}: its pi runs a pi-task extension from before the cap on sessions in use, and did "
+            f"not quit within {RENEW_TIMEOUT:g} s to be restarted with the current one; see `{PROG} show {sess.name}`")
+    append_log(sess.log_path, "renew", ext=st.get("ext") or 1)
+    say(f"{sess.name}: restarting pi, whose pi-task extension predates the cap on sessions in use", quiet)
+    return True
+
+
+def cmd_slot(argv):
+    """`pi-task _slot ask NAME PID SINCE WHY` and `pi-task _slot leave NAME PID`: the
+    extension's side of the cap. Prints the answer as one line of JSON."""
+    try:
+        op, name, pid = argv[0], argv[1], int(argv[2])
+        args = (float(argv[3]), argv[4]) if op == "ask" else ()
+        if op not in ("ask", "leave") or not NAME_RE.fullmatch(name):
+            raise ValueError(op)
+    except (IndexError, ValueError):
+        die("usage: pi-task _slot ask NAME PID SINCE WHY | _slot leave NAME PID", 2)
+    out = slot_ask(name, pid, *args) if op == "ask" else slot_leave(name, pid)
+    print(json.dumps(out), flush=True)
+    return 0
+
+
+def external_guard(a, control):
+    """Own the lease independently of the public wrapper. EOF means its parent died.
+    A Linux subreaper also catches orphaned/detached descendants during cleanup."""
+    import ctypes
+    import select
+    import secrets
+
+    os.setsid()                 # terminal signals go through the public wrapper
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), "cannot become a command subreaper")
+    children = Path(f"/proc/self/task/{os.getpid()}/children")
+    children.read_text()        # fail before launching if owned children cannot be inspected
+    cancelled = 0
+
+    def cancel(sig, frame):
+        nonlocal cancelled
+        cancelled = cancelled or sig
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, cancel)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    def check_parent(delay=0):
+        nonlocal cancelled
+        if select.select([control], [], [], delay)[0]:
+            data = os.read(control, 1)
+            cancelled = cancelled or (data[0] if data else signal.SIGTERM)
+
+    def reap():
+        """Reap all exited descendants; say whether any children still live."""
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return False
+            if not pid:
+                return True
+            if child is not None and pid == child.pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+
+    def terminate(sig):
+        # These unreaped direct children pin their PIDs. Killing their parents
+        # adopts deeper descendants here, even if they called setsid/setpgid.
+        # Do not killpg a reaped leader's ID: that ID could already be reused.
+        for pid in children.read_text().split():
+            try:
+                os.kill(int(pid), sig)
+            except ProcessLookupError:
+                pass
+
+    name = EXTERNAL_SLOT + secrets.token_hex(32)
+    pid, since = os.getpid(), time.time()
+    lease = {"start": process_start(pid), "model": a.model, "label": a.name}
+    if lease["start"] is None:
+        raise OSError("cannot read guardian process identity")
+    child = None
+    try:
+        noted = False
+        while True:
+            check_parent()
+            if cancelled:
+                return 128 + cancelled
+            info = slot_ask(name, pid, since, "external", lease=lease)
+            if info["granted"]:
+                break
+            if not noted:
+                print(f"{short(a.name, 64)}: waiting for a Qwen slot ({info['in_use']} of {info['cap']} in use, "
+                      f"{ordinal(info['position'] + 1)} in line)", file=sys.stderr, flush=True)
+                noted = True
+            check_parent(TICK)
+        check_parent()
+        if cancelled:
+            return 128 + cancelled
+        try:
+            child = subprocess.Popen(a.command, start_new_session=True)
+        except OSError as e:
+            print(f"{PROG}: {a.command[0]}: {e.strerror}", file=sys.stderr)
+            return 127 if e.errno == errno.ENOENT else 126
+        deadline = None
+        while True:
+            check_parent(TICK)
+            alive = reap()
+            if cancelled or child.returncode is not None:
+                if deadline is None:
+                    terminate(cancelled or signal.SIGTERM)
+                    deadline = time.monotonic() + 1
+                elif time.monotonic() >= deadline:
+                    terminate(signal.SIGKILL)
+                if not alive:
+                    rc = child.returncode
+                    return 128 + cancelled if cancelled else (rc if rc >= 0 else 128 - rc)
+    finally:
+        # Never release while a command/descendant still lives, including on an
+        # exception. The guardian outlives a killed public wrapper until done.
+        if child is not None:
+            while reap():
+                terminate(signal.SIGKILL)
+                time.sleep(0.02)
+        slot_leave(name, pid, start=lease["start"])
+
+
+def cmd_with_slot(a):
+    if not a.model.strip() or not a.name.strip() or not a.command or a.command[0] != "--" or len(a.command) < 2:
+        die("usage: pi-task with-slot --model MODEL --name LABEL -- COMMAND [ARG...]", 2)
+    a.command = a.command[1:]
+    control, notify = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    caught = 0
+
+    def forward(sig, frame):
+        nonlocal caught
+        if not caught:
+            caught = sig
+            os.write(notify, bytes([sig]))
+
+    handlers = {sig: signal.signal(sig, forward) for sig in
+                (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)}
+    try:
+        guardian = os.fork()
+        if guardian == 0:
+            os.close(notify)
+            try:
+                rc = external_guard(a, control)
+            except BaseException as e:
+                print(f"{PROG}: with-slot: {e}", file=sys.stderr, flush=True)
+                rc = 1
+            os._exit(rc)
+        os.close(control)
+        _, status = os.waitpid(guardian, 0)
+        return os.waitstatus_to_exitcode(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status)
+    finally:
+        os.close(notify)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
+# ---------------------------------------------------------------- waiting
+
+class Outcome:
+    def __init__(self):
+        self.status = "waiting"      # done | error | timeout | interrupted
+        self.error = None
+        self.read = False
+        self.sent = False            # pi took the item: sent to it, or compacting for it
+        self.replies = []            # assistant events since the message was read
+        self.compacts = []
+        self.ctx = None
+        self.aborted = False
+        self.stop = None             # the requested run's idle stop reason, not a newer state snapshot
+
+
+def scan(records, seq, out, compact=False):
+    """Feed log records to `out`. True once the reply to item `seq` is complete."""
+    for r in records:
+        ev = r.get("ev")
+        if r.get("ctx") is not None:
+            out.ctx = r["ctx"]
+        if ev == "compacted":
+            out.ctx = r.get("post")      # None until the next answer reports the context again
+        if ev in ("dropped", "failed") and seq in (r.get("seqs") or []):
+            out.status, out.error = "error", r.get("error") or r.get("reason") or ev
+            if r.get("reason"):
+                out.error = f"the message was dropped: pi-task {r['reason']} the session before pi read it"
+            return True
+        if ev in ("sent", "compacting") and r.get("seq") == seq:
+            out.sent = True
+        if compact:
+            if ev in ("compacted", "compact_failed") and r.get("seq") == seq:
+                if ev == "compacted":
+                    out.compacts.append(r)
+                    out.status = "done"
+                else:
+                    error = r.get("error") or "unknown error"
+                    out.status = "error"
+                    out.error = error if error.lower().startswith("compaction") else f"compaction failed: {error}"
+                return True
+        elif ev == "read" and r.get("seq") == seq:
+            out.read, out.replies, out.compacts = True, [], []
+        elif out.read:
+            if ev == "assistant":
+                out.replies.append(r)
+            elif ev == "compacted":
+                out.compacts.append(r)
+            elif ev == "idle":
+                out.status, out.aborted = "done", bool(r.get("aborted"))
+                out.stop = r.get("stop")
+                return True
+        if ev == "shutdown" and (out.read or out.sent):
+            out.status = "error"
+            out.error = ("pi-task stop ended the session" if r.get("stopping") else
+                         f"pi exited before it finished; `{PROG} recover` resumes it")
+            return True
+    return False
+
+
+def tree_cpu(pid):
+    """CPU seconds used by process `pid` and its descendants, reaped children included."""
+    children, used = {}, {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="ascii", errors="replace") as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        children.setdefault(int(fields[1]), []).append(int(entry))
+        used[int(entry)] = sum(int(x) for x in fields[11:15])   # utime, stime, cutime, cstime
+    total, todo = 0, [pid]
+    while todo:
+        p = todo.pop()
+        total += used.get(p, 0)
+        todo += children.get(p, [])
+    return total / os.sysconf("SC_CLK_TCK")
+
+
+class StartWatch:
+    """Tells a slow start of pi from a stuck one, for a waiter.
+
+    pi-task logs "launch" before it starts pi, and every later event comes from the
+    extension, so the extension has started once any event follows the last launch. Until
+    then pi counts as progressing while its processes use CPU, its screen changes or the
+    log grows. Only a pi that shows none of these for EXT_START_TIMEOUT counts as stuck."""
+
+    def __init__(self):
+        self.started = True          # until a launch record says otherwise
+        self.moved = time.time()     # when pi last showed progress
+        self.cpu = self.screen = None
+
+    def feed(self, records):
+        for r in records:
+            self.started = r.get("ev") != "launch"
+            self.moved = time.time()
+
+    def stalled(self, sess, pid):
+        """Seconds pi has shown no progress while its extension has not started; 0 once it has."""
+        if self.started:
+            self.cpu = self.screen = None
+            return 0
+        now = time.time()
+        cpu, screen = tree_cpu(pid) if pid else 0, sess.screen()
+        if self.cpu is None or cpu - self.cpu >= CPU_STEP or screen != self.screen:
+            self.moved = now
+        self.cpu, self.screen = cpu, screen
+        return now - self.moved
+
+
+def wait_for(sess, seq, timeout=None, verbose=False, compact=False, quiet=False, cancel_event=None):
+    """Wait until pi has read item `seq` and the session has settled. Says on stderr when the
+    session waits for a Qwen slot and when it gets one, unless quiet. cancel_event stops only
+    this observer, returning its partial Outcome after a final scan; it never controls pi."""
+    out = Outcome()
+    log = Tail(sess.log_path)
+    watch = StartWatch()
+    started = time.time()
+    deadline = started + timeout if timeout else None
+    check_at = started + 2
+    seen = 0
+    try:
+        while True:
+            records = log.lines()
+            watch.feed(records)
+            for r in records:
+                line = render_event(r) if r.get("ts", 0) >= started - 1 else None
+                if line and verbose:
+                    print(line, file=sys.stderr, flush=True)
+                elif line and r.get("ev") in ("waiting", "slot"):
+                    say(f"{sess.name}: {line[3:]}", quiet)
+            if scan(records, seq, out, compact):
+                return out
+            if cancel_event is not None and cancel_event.is_set():
+                return out
+            now = time.time()
+            if deadline and now >= deadline:
+                out.status = "timeout"
+                return out
+            if now >= check_at:
+                check_at = now + 2
+                pane = sess.pane()
+                if not pane or pane["dead"]:
+                    if scan(log.lines(), seq, out, compact):
+                        return out
+                    seen += 1
+                    if seen < 2:
+                        continue     # pi may be starting or restarting: look once more
+                    out.status = "error"
+                    cut = interruption(sess)
+                    pane = sess.pane()
+                    if cut:
+                        out.error = f"a crash or reboot cut the session ({cut}); `{PROG} recover` resumes it"
+                    elif pane and pane["dead"]:
+                        out.error = f"pi exited (status {pane['status']}):\n{sess.pane_tail()}"
+                    else:
+                        out.error = f"pi stopped before it answered; see `{PROG} log {sess.name}`"
+                    return out
+                seen = 0
+                still = watch.stalled(sess, pane["pid"])
+                if still > EXT_START_TIMEOUT:
+                    out.status = "error"
+                    out.error = (f"pi runs, but the pi-task extension has not started, and pi has shown no "
+                                 f"progress for {fmt_dur(still)}; see `{PROG} show {sess.name}`:\n{sess.pane_tail()}")
+                    return out
+            if cancel_event is None:
+                time.sleep(TICK)
+            else:
+                cancel_event.wait(TICK)
+    except KeyboardInterrupt:
+        out.status = "interrupted"
+        return out
+
+
+def render_event(r):
+    ev = r.get("ev")
+    if ev == "tool":
+        return f"  {r.get('name')}: {short(r.get('summary') or '', 160)}"
+    if ev == "assistant" and (r.get("text") or "").strip():
+        return f"qwen> {short(r['text'], 300)}"
+    if ev == "assistant" and r.get("stop") == "error":
+        return f"-- error: {short(r.get('error') or '', 300)}"
+    if ev == "compacted":
+        return f"-- compacted ({r.get('reason')}): {fmt_tokens(r.get('pre'))} tokens summarized"
+    if ev == "idle":
+        return "-- run ended" + (" (interrupted)" if r.get("aborted") else "")
+    if ev == "waiting":
+        place = f", {ordinal(r['position'] + 1)} in line" if isinstance(r.get("position"), int) else ""
+        return f"-- waiting for a Qwen slot ({r.get('in_use')} of {r.get('cap')} in use{place})"
+    if ev == "slot" and (r.get("waited") or 0) >= 1:
+        return f"-- got a Qwen slot after {fmt_dur(r['waited'])}"
+    return None
+
+
+def reply_text(out):
+    texts = [r["text"].strip() for r in out.replies if (r.get("text") or "").strip()]
+    return texts[-1] if texts else ""
+
+
+def stop_reason(out, st):
+    """The last assistant message's stop reason, from the log or from state.json."""
+    last = out.replies[-1] if out.replies else None
+    return (last.get("stop") if last else None) or st.get("last_stop") or None
+
+
+def no_answer(name, stop):
+    """The stderr line for a run that ended with no answer text."""
+    why = (f"; the output limit was reached (stop reason {stop})" if stop in ("length", "max_tokens")
+           else (f" (stop reason {stop})" if stop else ""))
+    return (f"{name}: Qwen gave no answer{why}; "
+            f"try {PROG} send {name} -e medium '...' or a smaller task")
+
+
+def report(sess, out, a, started, new=False, compact=False):
+    """Print the answer to stdout and a status line to stderr. Returns the exit status."""
+    quiet = getattr(a, "quiet", False)
+    last = out.replies[-1] if out.replies else None
+    failed = bool(last and last.get("stop") == "error" and not out.aborted)
+    text = reply_text(out)
+    st, m = sess.state(), sess.meta()
+    empty = (out.status == "done" and not out.aborted and not failed and not text and not compact)
+    if a.json:
+        error = out.error or ("interrupted" if out.aborted else (last.get("error") if failed else None))
+        data = {
+            "session": sess.name, "status": out.status if not (out.aborted or failed) else "error",
+            "error": error, "reply": text,
+            "model": f"{st.get('provider') or m.get('provider')}/{st.get('model') or m.get('model')}",
+            "thinking": st.get("thinking") or m.get("thinking"),
+            "compactions": [{"reason": c.get("reason"), "pre": c.get("pre"), "post": c.get("post")}
+                            for c in out.compacts],
+            "context_tokens": out.ctx, "pi_session_file": st.get("session_file")}
+        if empty:
+            data["answer_empty"] = True
+            data["stop_reason"] = stop_reason(out, st)
+        print(json.dumps(data, ensure_ascii=False, indent=1), flush=True)
+    else:
+        if text:
+            print(text, flush=True)
+        for c in out.compacts:
+            line = (f"Compacted: {fmt_tokens(c.get('pre'))} -> {fmt_tokens(c.get('post'))} tokens." if c.get("post")
+                    else f"Compacted: {fmt_tokens(c.get('pre'))} tokens summarized.")
+            if compact:
+                print(line, flush=True)
+            else:
+                say(line, quiet)
+    took = fmt_dur(time.time() - started)
+    if out.status == "done":
+        if empty:
+            say(no_answer(sess.name, stop_reason(out, st)))
+            return 1
+        if out.aborted:
+            bits = [f"{sess.name} interrupted after {took}"]
+        elif failed:
+            bits = [f"{sess.name} error after {took}: {short(last.get('error') or '', 300)}"]
+        else:
+            bits = [f"{sess.name} done after {took}"]
+        if out.ctx:
+            bits.append(f"context {fmt_tokens(out.ctx)} tokens")
+        bits.append(f"{st.get('model') or m.get('model')}/{st.get('thinking') or m.get('thinking')}")
+        if new:
+            bits.append(f'follow up: {PROG} send {sess.name} "..."')
+        say(" · ".join(bits), quiet and not (failed or out.aborted))
+        return 1 if (failed or out.aborted) else 0
+    if out.status == "error":
+        say(f"{sess.name} error: {out.error}")
+        return 1
+    state = describe_state(sess)
+    if state == "waiting":
+        cap, _, users, line, _ = slot_view(slot_model(sess.name))
+        state = f"waiting for a Qwen slot: {waiting_note(sess.name, users, line, cap)}"
+    say(f"{sess.name} is still working after {took} ({state}). "
+        f"Wait again: {PROG} wait {sess.name}", quiet and out.status != "interrupted")
+    return 130 if out.status == "interrupted" else 3
+
+
+def wait_controls(sess, seqs, timeout):
+    """Collect the extension's answers to queued controls: {seq: record}."""
+    want, got = set(seqs), {}
+    log = Tail(sess.log_path)
+    deadline = time.time() + timeout
+    while want - set(got) and time.time() < deadline:
+        for r in log.lines():
+            if r.get("ev") == "control" and r.get("seq") in want:
+                got[r["seq"]] = r
+        time.sleep(0.2)
+    return got
+
+
+# ---------------------------------------------------------------- commands
+
+WRITE_BLOCKED = (errno.EROFS, errno.EACCES, errno.EPERM)
+
+
+def preflight():
+    """Stop early where pi-task cannot work: no write access to its state."""
+    probe_file = STATE_DIR / f".probe-{os.getpid()}"
+    try:
+        SESSIONS.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(probe_file, os.O_CREAT | os.O_WRONLY, 0o600))
+        probe_file.unlink()
+    except OSError as e:
+        hint = (" The Codex sandbox blocks this: run the same pi-task command with escalated permissions."
+                if caller() == "codex" or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") else "")
+        die(f"cannot write {STATE_DIR}: {e.strerror}.{hint}")
+    if not pi_bin():
+        die("cannot find the pi command; set PI_TASK_PI")
+    if not EXTENSION.is_file():
+        die(f"the pi-task extension is missing: {EXTENSION}")
+
+
+def get_text(a, what):
+    if getattr(a, "file", None):
+        text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8")
+    elif a.text:
+        text = " ".join(a.text)
+        if text == "-":
+            text = sys.stdin.read()
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        die(f"no {what}: pass it as arguments, with -f FILE, or on stdin", 2)
+    text = text.strip()
+    if not text:
+        die(f"the {what} is empty", 2)
+    return text
+
+
+def check_slash(text):
+    """None for text, the focus for /compact; dies for other slash commands."""
+    if not is_command(text):
+        return None
+    cmd, _, rest = text.partition(" ")
+    if cmd == "/compact":
+        return rest.strip()
+    die(f"{cmd} is a pi TUI command, and pi-task sends text. Use `{PROG} compact` or `{PROG} set`, "
+        f"or type it in the window (`{PROG} show NAME`)", 2)
+
+
+STOPWORDS = set("a an and are as at be by can could do does for from i in is it me my of on or our "
+                "please should that the this to we what when where which why will with would you your".split())
+
+
+def make_name(text):
+    import secrets
+    words = [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOPWORDS][:3]
+    base = "-".join(words)[:24].strip("-") or "task"
+    while True:
+        name = f"{base}-{secrets.token_hex(2)}"
+        if not (SESSIONS / name).exists():
+            return name
+
+
+def cmd_new(a):
+    import uuid
+    preflight()
+    text = get_text(a, "prompt")
+    if is_command(text):
+        die("start a session with a task, not a slash command", 2)
+    cwd = Path(a.cwd or os.getcwd()).expanduser().resolve()
+    if not cwd.is_dir():
+        die(f"no such directory: {cwd}", 2)
+    if a.name and (not NAME_RE.fullmatch(a.name) or a.name == "last"):
+        die("--name takes letters, digits, '.', '_' and '-', at most 64, and not 'last'", 2)
+    name = a.name or make_name(text)
+    if (SESSIONS / name).exists():
+        die(f"a session named {name} exists already")
+    tname = tmux_name(name)
+    if tname in (panes() or {}) or any(s.tmux == tname for s in all_sessions()):
+        die(f"tmux session {tname} is taken on the {TMUX_SOCKET} server; pick another name")
+    prov, model, cfg, note = pick_model(a.model)
+    thinking = check_thinking(a.thinking, cfg, model)
+    sess = Session(name)
+    try:
+        sess.dir.mkdir(parents=True)
+    except FileExistsError:
+        die(f"a session named {name} exists already")
+    sess.queue_dir.mkdir()
+    sess.sent_dir.mkdir()
+    now = time.time()
+    hidden = a.hidden or (HIDDEN_DEFAULT and not a.window)
+    prepare = getattr(a, "prepare", False)
+    extra_prompt = a.append_system_prompt
+    if prepare:
+        extra_prompt = "\n\n".join(part for part in (extra_prompt, text) if part)
+    write_json(sess.meta_path, {
+        "name": name, "pi_session_id": str(uuid.uuid4()), "cwd": str(cwd), "created": now, "updated": now,
+        "by": caller(), "parent": os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("PI_SESSION_ID"),
+        "title": short(text.splitlines()[0], 100), "provider": prov, "model": model, "thinking": thinking,
+        "hidden": hidden, "tmux": tname, "append_system_prompt": extra_prompt,
+        "pi_args": shlex.split(a.pi_args) if a.pi_args else [], "next_seq": 1, "last_msg": None})
+    if note:
+        say(note)
+    say(f"session {name}: {prov}/{model} · thinking {thinking} · {cwd}" + (" · hidden" if hidden else ""), a.quiet)
+    if prepare:
+        sess.launch(quiet=a.quiet)
+        say("prepared: context loaded; no task sent. Type in the window or use pi-task send.", a.quiet)
+        print(name)
+        return 0
+    [seq] = sess.enqueue([{"kind": "message", "text": text}])
+    sess.launch(quiet=a.quiet)
+    if a.bg:
+        print(name)
+        return 0
+    return report(sess, wait_for(sess, seq, a.timeout, a.verbose, quiet=a.quiet), a, now, new=True)
+
+
+def session_model(sess, a=None):
+    """Make sure the session's model is served, switching to a served one if not. Returns the
+    settings to change and a note. Exits 4 when no Qwen model is served."""
+    m = sess.meta()
+    want = (a.model if a and a.model else None) or f"{m['provider']}/{m['model']}"
+    if not (a and a.model) and not find_model(want, *configured()):
+        want = None                  # its model left models.json: pick as for a new session
+    prov, model, cfg, note = pick_model(want)
+    settings = {}
+    if (prov, model) != (m["provider"], m["model"]):
+        settings.update(provider=prov, model=model)
+    thinking = a.thinking if a and a.thinking else m.get("thinking")
+    if thinking not in model_levels(cfg):
+        thinking = check_thinking(a.thinking if a and a.thinking else None, cfg, model)
+    if thinking != m.get("thinking"):
+        settings["thinking"] = thinking
+    return settings, note
+
+
+def settings_controls(settings):
+    if not settings:
+        return []
+    item = {"kind": "control"}
+    if "model" in settings:
+        item["model"] = f"{settings['provider']}/{settings['model']}"
+    if "thinking" in settings:
+        item["thinking"] = settings["thinking"]
+    return [item]
+
+
+def cmd_send(a):
+    preflight()
+    sess = resolve(a.session)
+    text = get_text(a, "message")
+    focus = check_slash(text)
+    if focus is not None:
+        a.text, a.file = [focus] if focus else [], None
+        return cmd_compact(a)
+    settings, note = session_model(sess, a)
+    if note:
+        say(f"{sess.name}: {note}")
+    items = ([{"kind": "interrupt"}] if a.interrupt else []) + settings_controls(settings)
+    items.append({"kind": "message", "text": text, "deliver": "followUp" if a.after else "steer"})
+    started = time.time()
+    with sess.start_lock():
+        restarted = renew(sess, a.quiet)
+        seqs = sess.enqueue(items, settings)
+        if settings:
+            say(f"{sess.name}: now " + " · ".join(f"{k} {v}" for k, v in settings.items() if k != "provider"),
+                a.quiet)
+        sess.launch(window=False if restarted else None, quiet=a.quiet)
+    if a.bg:
+        say(f"{sess.name}: message queued", a.quiet)
+        return 0
+    return report(sess, wait_for(sess, seqs[-1], a.timeout, a.verbose, quiet=a.quiet), a, started)
+
+
+def cmd_wait(a):
+    sess = resolve(a.session)
+    seq = sess.meta().get("last_msg")
+    if not seq:
+        die(f"nothing has been sent to {sess.name}")
+    started = time.time()
+    compact = is_compact(sess, seq)
+    return report(sess, wait_for(sess, seq, a.timeout, a.verbose, compact=compact, quiet=a.quiet), a, started,
+                  compact=compact)
+
+
+def wait_many_failed(out, compact):
+    """Match report's failure, interrupted-run and empty-answer exit rules."""
+    last = out.replies[-1] if out.replies else None
+    return (out.status in ("error", "interrupted") or out.aborted or
+            bool(last and last.get("stop") == "error") or
+            (out.status == "done" and not compact and not reply_text(out)))
+
+
+def reported_usage(replies):
+    """Sum every captured response; a missing or malformed count makes that sum unknown."""
+    totals = {"response_count": len(replies)}
+    for field in ("input", "output", "total"):
+        values = [(r["usage"].get(field) if isinstance(r.get("usage"), dict) else None) for r in replies]
+        totals[field + "_tokens"] = (sum(values) if values and
+                                     all(type(v) is int and v >= 0 for v in values) else None)
+    return totals
+
+
+def write_wait_many_artifact(path, data):
+    """Publish a complete private JSON file atomically, without replacing any existing path."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), 0o600)
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        # Unlike replace(), link() atomically refuses even a destination created during the wait.
+        os.link(tmp, path)
+    finally:
+        os.unlink(tmp)
+
+
+def cmd_wait_many(a):
+    """Observe frozen last messages concurrently, cancelling only observers when finished."""
+    import math
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from threading import Event
+
+    if not 1 <= len(a.sessions) <= 32 or any(not ref.strip() for ref in a.sessions):
+        die("wait-many needs 1 to 32 nonempty session names", 2)
+    if not math.isfinite(a.timeout) or a.timeout < 0:
+        die("--timeout must be a finite nonnegative number of seconds", 2)
+    if not 0 <= a.reply_chars <= 8192:
+        die("--reply-chars must be between 0 and 8192", 2)
+    output = Path(a.output).expanduser().absolute() if a.output else None
+    if output is not None and os.path.lexists(output):
+        die(f"refusing to replace existing result {output}", 2)
+
+    targets, names = [], set()
+    for ref in a.sessions:
+        sess = resolve(ref)          # Never resolve an alias or read last_msg again while waiting.
+        if sess.name in names:
+            die(f"duplicate resolved session {sess.name!r}", 2)
+        names.add(sess.name)
+        meta = sess.meta()
+        seq = meta.get("last_msg")
+        if type(seq) is not int or seq < 1:
+            die(f"nothing has been sent to {sess.name}", 2)
+        targets.append((sess, seq, meta.get("pi_session_id"), is_compact(sess, seq)))
+
+    deadline = time.monotonic() + a.timeout
+    cancel = Event()
+    pool = ThreadPoolExecutor(max_workers=len(targets))
+    futures = {}
+    interrupted = False
+    try:
+        for index, (sess, seq, _, compact) in enumerate(targets):
+            futures[pool.submit(wait_for, sess, seq, compact=compact, quiet=True, cancel_event=cancel)] = index
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, timeout=max(0, deadline - time.monotonic()),
+                                 return_when=FIRST_COMPLETED)
+            if any(f.exception() is not None or wait_many_failed(f.result(), targets[futures[f]][3])
+                   for f in done):
+                break
+            if time.monotonic() >= deadline:
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        cancel.set()
+        while True:
+            try:
+                pool.shutdown(wait=True)
+                break
+            except KeyboardInterrupt:
+                interrupted = True
+
+    outcomes = [Outcome() for _ in targets]
+    for future, index in futures.items():
+        try:
+            outcomes[index] = future.result()
+        except (Exception, SystemExit) as e:
+            outcomes[index].status, outcomes[index].error = "error", str(e)
+    failed = any(wait_many_failed(out, target[3]) for target, out in zip(targets, outcomes))
+    unfinished = any(out.status == "waiting" for out in outcomes)
+    status = "interrupted" if interrupted else "error" if failed else "timeout" if unfinished else "done"
+    results, raw_results = [], []
+    for (sess, seq, sid, compact), out in zip(targets, outcomes):
+        text = reply_text(out)
+        last = out.replies[-1] if out.replies else None
+        failed_answer = bool(last and last.get("stop") == "error" and not out.aborted)
+        empty = out.status == "done" and not out.aborted and not failed_answer and not text and not compact
+        stop = (last.get("stop") if last else None) or out.stop
+        error = out.error or ("interrupted" if out.aborted or out.status == "interrupted" else
+                              last.get("error") if failed_answer else None)
+        if empty:
+            error = no_answer(sess.name, stop)
+        target_status = "error" if wait_many_failed(out, compact) else out.status
+        if target_status == "waiting" and status == "timeout":
+            target_status = "timeout"
+        result = {"session": sess.name, "pi_session_id": sid, "seq": seq, "status": target_status,
+                  "error": error, "stop_reason": stop, "answer_empty": empty,
+                  "reply": text[:a.reply_chars], "reply_truncated": len(text) > a.reply_chars,
+                  "usage": reported_usage(out.replies)}
+        results.append(result)
+        raw_results.append(dict(result, reply=text, reply_truncated=False, outcome=vars(out)))
+    usage = {"response_count": sum(r["usage"]["response_count"] for r in results)}
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        values = [r["usage"][field] for r in results]
+        usage[field] = sum(values) if all(value is not None for value in values) else None
+    data = {"schema_version": 1, "status": status, "targets": results,
+            "usage_scope": "captured_assistant_responses", "usage": usage, "raw_artifact": None}
+    if output is not None:
+        try:
+            write_wait_many_artifact(output, dict(data, targets=raw_results, raw_artifact=str(output)))
+            data["raw_artifact"] = str(output)
+        except OSError as e:
+            data["status"], data["error"] = "error", f"cannot write result {output}: {e}"
+    print(json.dumps(data, ensure_ascii=False, separators=(",", ":")), flush=True)
+    return 0 if data["status"] == "done" else 3 if data["status"] == "timeout" else 1
+
+
+def is_compact(sess, seq):
+    """True if item `seq` is a compaction."""
+    return any(r.get("seq") == seq and r.get("ev") in ("compacting", "compacted", "compact_failed")
+               for r in Tail(sess.log_path).lines()) or any(
+        item.get("seq") == seq and item["kind"] == "compact" for _, item in sess.queued())
+
+
+def cmd_compact(a):
+    preflight()
+    sess = resolve(a.session)
+    focus = " ".join(a.text).strip()
+    settings, note = session_model(sess)     # the summary needs a served model too
+    if note:
+        say(f"{sess.name}: {note}")
+    started = time.time()
+    with sess.start_lock():
+        restarted = renew(sess, a.quiet)
+        seq = sess.enqueue(settings_controls(settings) + [{"kind": "compact", "text": focus}], settings)[-1]
+        sess.launch(window=False if restarted else None, quiet=a.quiet)
+    if a.bg:
+        say(f"{sess.name}: compaction queued", a.quiet)
+        return 0
+    return report(sess, wait_for(sess, seq, a.timeout, a.verbose, compact=True, quiet=a.quiet), a, started,
+                  compact=True)
+
+
+def cmd_set(a):
+    sess = resolve(a.session)
+    m, st = sess.meta(), sess.state()
+    if not a.model and not a.thinking:
+        live = f" (running: {st.get('provider')}/{st.get('model')}, {st.get('thinking')})" if sess.alive() else ""
+        print(f"model {m['provider']}/{m['model']} · thinking {m['thinking']}{live}")
+        return 0
+    if a.model:
+        settings, note = session_model(sess, a)
+        if note:
+            die(f"{note.split(';')[0]}; not switching", EXIT_UNAVAILABLE)
+    else:
+        _, _, cfg = find_model(f"{m['provider']}/{m['model']}", *configured()) or die(
+            f"{m['provider']}/{m['model']} is no longer in {PI_AGENT_DIR / 'models.json'}")
+        settings = {"thinking": check_thinking(a.thinking, cfg, m["model"])}
+    if not settings:
+        say(f"{sess.name}: nothing to change")
+        return 0
+    what = " · ".join(f"{k} {v}" for k, v in settings.items() if k != "provider")
+    seqs = sess.enqueue(settings_controls(settings), settings)
+    if not seqs:
+        say(f"{sess.name}: {what}; applies when pi starts again")
+        return 0
+    got = wait_controls(sess, seqs, 20)
+    errors = [r.get("error") for r in got.values() if not r.get("ok")]
+    if errors:
+        say(f"{sess.name}: pi refused: {'; '.join(str(e) for e in errors)}")
+        return 1
+    if len(got) < len(seqs):
+        say(f"{sess.name}: {what}; queued, not confirmed yet")
+        return 0
+    r = next(iter(got.values()))
+    say(f"{sess.name}: now {r.get('model')} · thinking {r.get('thinking')}")
+    return 0
+
+
+def cmd_interrupt(a):
+    sess = resolve(a.session)
+    seqs = sess.enqueue([{"kind": "interrupt"}])
+    if not seqs:
+        say(f"{sess.name} is not running")
+        return 0
+    got = wait_controls(sess, seqs, 10)
+    if not got:
+        # The extension did not answer: press Esc in pi's TUI, as the user would.
+        keys = tmux("send-keys", "-t", f"={sess.tmux}:", "Escape")
+        say(f"{sess.name}: the pi-task extension did not answer; " +
+            ("pressed Esc in pi's window" if keys.returncode == 0 else f"Esc failed too: {keys.stderr.strip()}"))
+        return 0 if keys.returncode == 0 else 1
+    elif not next(iter(got.values())).get("running"):
+        say(f"{sess.name}: nothing was running")
+    else:
+        say(f"{sess.name}: interrupted")
+    return 0
+
+
+def cmd_stop(a):
+    sess = resolve(a.session)
+    if a.force:
+        return force_stop(sess)
+    if not sess.alive():
+        cleanup(sess)
+        dropped = discard(sess, "stopped")
+        say(f"{sess.name} is not running" + (f"; dropped {plural(dropped, 'queued message')}" if dropped else ""))
+        return 0
+    sess.enqueue([{"kind": "stop"}])
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if not sess.alive():
+            cleanup(sess)
+            say(f"{sess.name} stopped")
+            return 0
+        time.sleep(TICK)
+    say(f"{sess.name} is still stopping; `{PROG} stop --force {sess.name}` kills it")
+    return 1
+
+
+def cleanup(sess):
+    """End the session's tmux session once pi is gone, which closes its windows."""
+    if sess.pane():
+        tmux("kill-session", "-t", f"={sess.tmux}")
+
+
+def force_stop(sess):
+    pane = sess.pane()
+    pid = pane["pid"] if pane and not pane["dead"] else None
+    if pane:
+        tmux("kill-session", "-t", f"={sess.tmux}")   # pi gets SIGHUP and shuts down
+    deadline = time.time() + 5
+    while pid_alive(pid) and time.time() < deadline:
+        time.sleep(0.1)
+    if pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    discard(sess, "killed")
+    say(f"{sess.name} killed")
+    return 0
+
+
+def discard(sess, reason):
+    """For a session whose pi is gone: drop what is queued or was cut, so that recover leaves it
+    alone, and fail whoever waits for it. Returns the number of messages dropped."""
+    with sess.lock():
+        left = sess.queued(sess.sent_dir) + sess.queued()
+        for path, _ in left:
+            path.unlink(missing_ok=True)
+        seqs = [item["seq"] for _, item in left if item["kind"] in ("message", "compact")]
+        st = sess.state()
+        if seqs:
+            append_log(sess.log_path, "dropped", seqs=seqs, reason=reason)
+        if seqs or st.get("busy") or st.get("compacting") or st.get("cut") or reason == "killed":
+            append_log(sess.log_path, "shutdown", reason=reason, stopping=True, cut=None)
+        if st:
+            write_json(sess.state_path, dict(st, busy=False, compacting=False, starting=None, pending=[], cut=None,
+                                             stopped=st.get("stopped") or time.time(), updated=time.time()))
+    return len(seqs)
+
+
+def attested_runtime(sess, st, alive):
+    """Only a live same-session PID/start/boot receipt attests a running build."""
+    unknown = lambda reason: {"verified": False, "version": None, "source_revision": None, "reason": reason}
+    receipt = st.get("runtime_identity")
+    if not alive or st.get("stopped"):
+        return unknown("not running")
+    if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
+        return unknown("legacy or missing runtime receipt")
+    pid = st.get("pid")
+    if type(pid) is not int or pid <= 0 or type(receipt.get("pid")) is not int or receipt["pid"] != pid:
+        return unknown("PID or process start mismatch")
+    if not isinstance(receipt.get("start"), str) or not receipt["start"].isdigit() or process_start(pid) != receipt["start"]:
+        return unknown("PID or process start mismatch")
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return unknown("boot identity unavailable")
+    if not receipt.get("boot_id") or receipt["boot_id"] != boot:
+        return unknown("boot identity mismatch")
+    sid = st.get("session_id")
+    if not isinstance(sid, str) or not sid or receipt.get("session_id") != sid or sess.meta().get("pi_session_id") != sid:
+        return unknown("conversation identity mismatch")
+    if not runs_pi(sess.dir, pid):
+        return unknown("process ownership not verified")
+    version = receipt.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,159}", version):
+        return unknown("runtime version unavailable")
+    source = receipt.get("source_revision")
+    source = source if isinstance(source, str) and re.fullmatch(r"[a-f0-9]{40}", source) else None
+    return {"verified": True, "version": version, "source_revision": source,
+            "pid": pid, "start": receipt["start"], "boot_id": boot, "session_id": sid}
+
+
+def cmd_status(a):
+    sess = resolve(a.session)
+    m, st, all_panes = sess.meta(), sess.state(), panes()
+    alive = sess.alive(all_panes)
+    state, cut = describe_state(sess, st, alive, all_panes), interruption(sess, st, alive)
+    clients = sess.clients() if alive else []
+    runtime_identity = attested_runtime(sess, st, alive)
+    slot = None
+    if state == "waiting":
+        cap, _, users, line, _ = slot_view(slot_model(sess.name))
+        slot = {"in_use": len(users), "cap": cap,
+                "position": line.index(sess.name) + 1 if sess.name in line else None}
+    if a.json:
+        print(json.dumps({"session": sess.name, "state": state, "interruption": cut, "slot": slot, "meta": m,
+                          "runtime": st, "runtime_identity": runtime_identity, "process_running": alive, "windows": len(clients),
+                          "pane": sess.pane(all_panes)}, ensure_ascii=False, indent=1))
+        return 0
+    tokens = st.get("tokens") or {}
+    shown = (f"waiting for a Qwen slot ({waiting_note(sess.name, users, line, cap)})" if slot else state)
+    rows = [("pi version", (runtime_identity["version"] + " (running; PID/start/boot verified)"
+                            if runtime_identity["verified"] else "unknown (" + runtime_identity["reason"] + ")")),
+            ("source", runtime_identity.get("source_revision") or "unknown"),
+            ("state", shown + (f" ({cut})" if cut else "")
+                      + (f" · last: {st['activity']} ({fmt_dur(time.time() - st['activity_at'])} ago)"
+                         if alive and st.get("activity") and st.get("activity_at") else "")),
+            ("model", f"{st.get('provider') or m['provider']}/{st.get('model') or m['model']} · thinking "
+                      f"{st.get('thinking') or m['thinking']}"
+                      + ("" if alive else f" (next run: {m['provider']}/{m['model']}, {m['thinking']})")),
+            ("context", f"{fmt_tokens(st.get('ctx'))} of {fmt_tokens(st.get('ctx_window'))} tokens · used "
+                        f"{fmt_tokens(tokens.get('input'))} in, {fmt_tokens(tokens.get('output'))} out"),
+            ("directory", m.get("cwd")),
+            ("started", f"{fmt_time(m.get('created'))} by {m.get('by')}"),
+            ("process", (f"running (pi pid {st.get('pid')})" if alive else
+                         f"not running; `{PROG} recover` resumes it" if cut else
+                         "not running; the next message starts it")),
+            ("window", (plural(len(clients), "window") + " open" if clients else
+                        f"none; `{PROG} show {sess.name}` opens one") if alive else "-"),
+            ("tmux", f"tmux -L {TMUX_SOCKET} attach -t {sess.tmux}")]
+    queued = len(sess.messages_waiting())
+    if queued:
+        rows.append(("queued", plural(queued, "item")))
+    if alive and old_extension(sess, st):
+        rows.append(("extension", "predates the cap on sessions in use: its runs start without a Qwen slot; "
+                                  "the next message while it is idle restarts pi"))
+    if st.get("error"):
+        rows.append(("last error", st["error"]))
+    if st.get("last_text"):
+        rows.append(("last answer", short(st["last_text"], 200)))
+    rows += [("pi session", st.get("session_file") or m.get("pi_session_id")), ("files", str(sess.dir))]
+    print(f"{sess.name}: {m.get('title')}")
+    for key, value in rows:
+        print(f"  {key:<11} {value}")
+    return 0
+
+
+def cmd_list(a):
+    rows, all_panes = [], panes()
+    for sess in all_sessions():
+        m, st = sess.meta(), sess.state()
+        alive = sess.alive(all_panes)
+        rows.append((last_active(sess), sess, m, st, describe_state(sess, st, alive, all_panes),
+                     interruption(sess, st, alive)))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    if not a.all:
+        rows = rows[:20]
+    slots = slot_view() if any(r[4] == "waiting" for r in rows) else None
+
+    def slot(name):
+        table = slots[4]
+        model = slot_model(name, table["waiters"].get(name))
+        cap, _ = read_cap(model)
+        users, line = slot_users(table, model), slots_line(table, model)
+        return {"in_use": len(users), "cap": cap, "position": line.index(name) + 1 if name in line else None}
+
+    if a.json:
+        print(json.dumps([{"session": s.name, "state": state, "interruption": cut,
+                           **({"slot": slot(s.name)} if state == "waiting" else {}),
+                           "model": f"{m.get('provider')}/{m.get('model')}", "thinking": m.get("thinking"),
+                           "context_tokens": st.get("ctx"), "updated": t, "cwd": m.get("cwd"),
+                           "title": m.get("title"), "by": m.get("by"), "hidden": m.get("hidden")}
+                          for t, s, m, st, state, cut in rows], ensure_ascii=False, indent=1))
+        return 0
+    if not rows:
+        print("no sessions")
+        return 0
+    table = [("NAME", "STATE", "MODEL", "CONTEXT", "ACTIVE", "TITLE")]
+    for t, s, m, st, state, _ in rows:
+        if state == "waiting":
+            info = slot(s.name)
+            state = f"waiting ({info['in_use']} of {info['cap']} in use)"
+        table.append((s.name, state, f"{m.get('model')}/{m.get('thinking')}", fmt_tokens(st.get("ctx")),
+                      fmt_dur(time.time() - t) + " ago", m.get("title") or ""))
+    widths = [max(len(r[i]) for r in table) for i in range(5)]
+    for r in table:
+        print("  ".join(r[i].ljust(widths[i]) for i in range(5)) + "  " + short(r[5], 60))
+    return 0
+
+
+def cmd_cap(a):
+    model = model_id(a.model)
+    probes, _ = configured()
+    if model and "/" in model and not any(model in p["configured"] for p in probes):
+        provider, mid = model.split("/", 1)
+        if any(p["provider"] == provider for p in probes):
+            model = mid
+    if a.model is not None and (not model or not model.strip("/")):
+        die("MODEL must name a model ID", 2)
+    cap_file = CAP_FILE.with_name(MODEL_CAPS_NAME) if model else CAP_FILE
+    if a.cap is not None:
+        if a.cap < 1:
+            die("the cap is a whole number from 1 up", 2)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with Flock(SLOTS_LOCK):
+            if model:
+                caps, problem = read_model_caps()
+                if problem:
+                    die(problem + "; refusing to overwrite existing overrides")
+                caps[model] = a.cap
+                write_json(cap_file, caps)
+            else:
+                tmp = CAP_FILE.with_name(f".{CAP_FILE.name}.{os.getpid()}.tmp")
+                tmp.write_text(f"{a.cap}\n", encoding="utf-8")
+                os.replace(tmp, CAP_FILE)
+            table = slots_read()
+            table["gen"] += 1            # waiting sessions ask again at once
+            write_json(SLOTS_FILE, table)
+    cap, problem, users, line, table = slot_view(model if model else ALL_MODELS)
+    old = [sess.name for sess in all_sessions() if old_extension(sess)]
+    holders, now = table["holders"], time.time()
+    order = sorted(users, key=lambda n: (n not in holders, holders.get(n, {}).get("since") or 0, n))
+    user_models = {n: slot_model(n, holders.get(n)) for n in users}
+    waiter_models = {n: slot_model(n, table["waiters"][n]) for n in line}
+    overrides, _ = read_model_caps()
+    known = ({model} if model else
+             set(overrides) | {mid for p in probes for mid in p["configured"]} |
+             set(user_models.values()) | set(waiter_models.values()))
+    models = {mid if mid is not None else "(unknown)": {
+        "cap": read_cap(mid)[0], "in_use": sum(m == mid for m in user_models.values()),
+        "waiting": sum(m == mid for m in waiter_models.values()), "override": mid in overrides}
+        for mid in sorted(known, key=lambda m: m or "")}
+    if a.json:
+        print(json.dumps({"cap": cap, "file": str(cap_file), "problem": problem, "model": model, "models": models,
+                          "in_use": [{"session": n, "what": users[n], "slot": n in holders,
+                                      "since": holders.get(n, {}).get("since"), "old_extension": n in old,
+                                      "model": user_models[n]}
+                                     for n in order],
+                          "waiting": [{"session": n, "queued": table["waiters"][n].get("since"),
+                                       "model": waiter_models[n]} for n in line],
+                          "old_extension": old}, ensure_ascii=False, indent=1))
+        return 0
+    if problem:
+        say(problem)
+    scope = f"for {model}" if model else "per model without its own cap"
+    print(f"cap: at most {plural(cap, 'session')} in use at once {scope}, every caller's ({cap_file})")
+    for mid, info in models.items():
+        print(f"  {mid}: cap {info['cap']}, in use {info['in_use']}, waiting {info['waiting']}"
+              + (" (model override)" if info["override"] else " (default cap)"))
+    width = max([len(n) for n in [*users, *line]] or [0])
+    if model or len(set(user_models.values()) | set(waiter_models.values())) <= 1:
+        actual_cap = read_cap(next(iter(user_models.values()), next(iter(waiter_models.values()), model)))[0]
+        print(f"in use: {len(users)} of {actual_cap}")
+    else:
+        print(f"in use: {len(users)} across models")
+    for n in order:
+        if n in holders:
+            what = f"{users[n]}, slot held for {fmt_dur(now - (holders[n].get('since') or now))}"
+        else:
+            what = f"{users[n]} without a slot: " + ("its pi-task extension predates the cap" if n in old
+                                                     else "a run started in its window")
+        print(f"  {n:<{width}}  {what} (model: {user_models[n] or 'unknown'})")
+    print(f"waiting: {len(line)}" + (", first come first served" if len(line) > 1 else ""))
+    for i, n in enumerate(line, 1):
+        w = table["waiters"][n]
+        print(f"  {i}. {n:<{width}}  queued {fmt_dur(now - (w.get('since') or now))} ago"
+              + (" (pi starting)" if w.get("pid") is None else ""))
+        print(f"      model: {waiter_models[n] or 'unknown'}")
+    if old:
+        print(f"older extension, runs start without a slot until pi-task restarts pi at its next message "
+              f"while idle: {', '.join(old)}")
+    return 0
+
+
+def session_file(sess):
+    path = sess.state().get("session_file")
+    if path and Path(path).exists():
+        return Path(path)
+    sid = sess.meta().get("pi_session_id")
+    return next(iter(sorted((PI_AGENT_DIR / "sessions").glob(f"*/*_{sid}.jsonl"))), None) if sid else None
+
+
+def render_entry(d, full=False):
+    """Readable lines for one entry of a pi session file."""
+    cut = (lambda t, n: str(t).strip()) if full else short
+    kind = d.get("type")
+    if kind == "message":
+        msg = d.get("message") or {}
+        role, content = msg.get("role"), msg.get("content")
+        if role == "user":
+            text = content if isinstance(content, str) else "\n".join(
+                c.get("text", "") for c in content or [] if c.get("type") == "text")
+            return [f"you> {cut(text, 300)}"]
+        if role == "assistant":
+            out = []
+            for c in content or []:
+                if c.get("type") == "text" and c.get("text", "").strip():
+                    out.append(f"qwen> {cut(c['text'], 300)}")
+                elif c.get("type") == "toolCall":
+                    args = c.get("arguments") or {}
+                    what = next((args[k] for k in ("command", "path", "file_path", "pattern") if args.get(k)),
+                                json.dumps(args, ensure_ascii=False))
+                    out.append(f"  {c.get('name')}: {cut(what, 160)}")
+            if msg.get("stopReason") == "error":
+                out.append(f"-- error: {cut(msg.get('errorMessage') or '', 300)}")
+            return out
+        if role == "toolResult" and full:
+            text = "\n".join(c.get("text", "") for c in content or [] if c.get("type") == "text")
+            return [f"    -> {cut(text, 2000)}"]
+        return []
+    if kind == "compaction":
+        return [f"-- compacted: {fmt_tokens(d.get('tokensBefore'))} tokens summarized"]
+    if kind == "model_change":
+        return [f"-- model {d.get('provider')}/{d.get('modelId')}"]
+    if kind == "thinking_level_change":
+        return [f"-- thinking {d.get('thinkingLevel')}"]
+    return []
+
+
+def cmd_log(a):
+    sess = resolve(a.session)
+    path = session_file(sess)
+    if not path:
+        die(f"{sess.name} has no pi conversation yet")
+    tail = Tail(path)
+    lines = [line for d in tail.lines() for line in render_entry(d, a.full)]
+    for line in lines[-a.lines:] if a.lines else lines:
+        print(line)
+    if a.follow:
+        try:
+            while True:
+                for d in tail.lines():
+                    for line in render_entry(d, a.full):
+                        print(line, flush=True)
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
+def cmd_result(a):
+    sess = resolve(a.session)
+    seq = sess.meta().get("last_msg")
+    if not seq:
+        die(f"nothing has been sent to {sess.name}")
+    out = Outcome()
+    compact = is_compact(sess, seq)
+    done = scan(Tail(sess.log_path).lines(), seq, out, compact=compact)
+    text = reply_text(out)
+    if text:
+        print(text)
+    if out.status == "error":
+        say(f"{sess.name} error: {out.error}")
+        return 1
+    if not done:
+        say(f"{sess.name} is {describe_state(sess)}; " + ("this is its answer so far" if text else "no answer yet"))
+        return 3
+    last = out.replies[-1] if out.replies else None
+    if out.aborted or (last and last.get("stop") == "error"):
+        say(f"{sess.name}: the run ended " + ("interrupted" if out.aborted else f"in an error: {last.get('error')}"))
+        return 1
+    if not text and not compact:
+        say(no_answer(sess.name, stop_reason(out, sess.state())))
+        return 1
+    return 0
+
+
+def ensure_running(sess, a):
+    """Start pi for show and attach when it does not run. Dies for an interrupted session."""
+    if sess.alive():
+        return False
+    cut = interruption(sess)
+    if cut:
+        die(f"{sess.name} was cut by a crash or reboot ({cut}); `{PROG} recover {sess.name}` resumes it")
+    preflight()
+    settings, note = session_model(sess)
+    if note:
+        say(f"{sess.name}: {note}")
+    if settings:
+        sess.enqueue([], settings)
+    sess.launch(window=False)
+    return True
+
+
+def cmd_show(a):
+    sess = resolve(a.session)
+    ensure_running(sess, a)
+    if sess.clients() and not a.new:
+        say(f"{sess.name} has a window open already; --new opens another")
+        return 0
+    return 0 if sess.open_window() else 1
+
+
+def cmd_hide(a):
+    sess = resolve(a.session)
+    say(f"{sess.name}: windows closed; pi keeps running" if sess.close_windows() else f"{sess.name} has no window open")
+    return 0
+
+
+def cmd_attach(a):
+    sess = resolve(a.session)
+    ensure_running(sess, a)
+    if not sys.stdin.isatty():
+        die("attach needs a terminal; `pi-task show NAME` opens a window", 2)
+    exe = shutil.which("tmux")
+    os.execvpe(exe, [exe, "-L", TMUX_SOCKET, "attach-session", "-t", f"={sess.tmux}"], child_env())
+
+
+def models_probe():
+    """One probe round, as models does: (probes, settings, pick, why)."""
+    probes, settings = availability()
+    why = None
+    try:
+        pick = choose_model()
+    except Unavailable as e:
+        pick = None
+        why = str(e)
+    return probes, settings, pick, why
+
+
+def models_report(probes, settings, pick, why, as_json):
+    """What models prints for one probe round: 0 when a Qwen model is served."""
+    default = f"{settings.get('defaultProvider')}/{settings.get('defaultModel')}"
+    if as_json:
+        print(json.dumps({"providers": [{"provider": p["provider"], "url": p["url"], "error": p["error"],
+                                         "served": p["served"], "configured": sorted(p["configured"])}
+                                        for p in probes],
+                          "pi_default": default, "pick": f"{pick[0]}/{pick[1]}" if pick else None,
+                          "pick_thinking": model_levels(pick[2])[-1] if pick else None,
+                          "note": pick[3] if pick else why}, ensure_ascii=False, indent=1))
+        return 0 if pick else EXIT_UNAVAILABLE
+    for p in probes:
+        print(f"{p['provider']} ({p['url']}): " + (f"unreachable: {p['error']}" if p["error"] else
+                                                   "serves " + (", ".join(p["served"]) or "nothing")))
+        for mid, cfg in p["configured"].items():
+            mark = "served" if mid in p["served"] else "not served"
+            print(f"  {p['provider']}/{mid}: {mark} · thinking {', '.join(model_levels(cfg))}"
+                  + (" · pi's default" if f"{p['provider']}/{mid}" == default else ""))
+        for mid in p["served"]:
+            if mid not in p["configured"]:
+                print(f"  {p['provider']}/{mid}: served, not in models.json")
+    if pick:
+        print(f"new sessions get {pick[0]}/{pick[1]} at thinking {model_levels(pick[2])[-1]}"
+              + (f" ({pick[3]})" if pick[3] else ""))
+        return 0
+    print(why)
+    return EXIT_UNAVAILABLE
+
+
+def cmd_models(a):
+    if not a.wait and (a.interval is not None or a.timeout is not None):
+        die("--interval and --timeout go with --wait", 2)
+    if not a.wait:
+        return models_report(*models_probe(), a.json)
+    interval = 60 if a.interval is None else a.interval
+    if interval <= 0:
+        die(f"--interval must be more than 0 s, got {a.interval:g}", 2)
+    deadline = time.monotonic() + a.timeout if a.timeout is not None else None
+    say(f"waiting for a Qwen model to be served, probing every {interval:g} s")
+    try:
+        while True:
+            probes, settings, pick, why = models_probe()
+            if pick:
+                return models_report(probes, settings, pick, why, a.json)
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                say(f"no Qwen model served after {a.timeout:g} s")
+                return EXIT_UNAVAILABLE
+            time.sleep(interval if deadline is None else min(interval, deadline - now))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+
+
+def cmd_rm(a):
+    for ref in a.sessions:
+        sess = resolve(ref)
+        if sess.alive():
+            if not a.force:
+                die(f"{sess.name} is running; stop it first, or pass --force")
+            force_stop(sess)
+        cleanup(sess)
+        shutil.rmtree(sess.dir)
+        say(f"removed {sess.name}; pi's conversation stays in {PI_AGENT_DIR / 'sessions'}")
+    return 0
+
+
+def cmd_recover(a):
+    if not a.dry_run:
+        preflight()
+    boot = boot_time()
+    found = []
+    for sess in [resolve(ref) for ref in a.sessions] if a.sessions else all_sessions():
+        cut = interruption(sess)
+        if not cut:
+            if a.sessions:
+                print(f"{sess.name} is {describe_state(sess)}: nothing to resume")
+            continue
+        found.append((sess, cut))
+    if a.dry_run:
+        for sess, cut in found:
+            print(f"would resume {sess.name}: {cut}")
+    for sess, cut in [] if a.dry_run else found:
+        settings, note = session_model(sess)
+        if note:
+            say(f"{sess.name}: {note}")
+        note_text = RESUME_PROMPT.format(boot=boot)
+        if any(sess.sent_dir.glob("*.json")) or sess.messages_waiting():
+            note_text += RESENT_NOTE
+        # The check runs again under the queue lock, so two recovers never resume a session twice.
+        item = {"kind": "message", "text": note_text, "first": True}
+        if sess.enqueue([item], settings, only_if=lambda s=sess: interruption(s)):
+            sess.launch()
+            print(f"resumed {sess.name}: {cut}")
+        else:
+            print(f"skipped {sess.name}: it started again meanwhile")
+    if not found:
+        if not a.sessions:
+            print("no session was cut by a crash or reboot")
+    elif a.dry_run:
+        again = " ".join([PROG, "recover", *a.sessions])
+        print(f"{plural(len(found), 'session')} to resume; `{again}` resumes them. The machine booted at {boot}.")
+    else:
+        print(f"The machine booted at {boot}. Follow a session with `{PROG} wait NAME`.")
+    return 0
+
+
+def cmd_exec(name):
+    """Run pi for a session; the session's tmux pane runs this and pi takes its place."""
+    sess = Session(name)
+    m = sess.meta()
+    # pi gets the environment of the pi-task command that started it, as claude-task's sessions
+    # do, and so do PI_TASK_PI and PI_TASK_EXTENSION here. That command left it in env.json; the
+    # file goes as soon as it is read.
+    env_file = sess.dir / "env.json"
+    env = read_json(env_file) or dict(os.environ)
+    env_file.unlink(missing_ok=True)
+    env = {k: v for k, v in env.items() if k not in PARENT_ENV}
+    exe = pi_bin(env)
+    if not exe:
+        print(f"{PROG}: cannot resolve the current managed Pi release", file=sys.stderr)
+        return 127
+    env["PI_TASK_PI"] = exe
+    release = Path(exe).parent.parent.parent
+    versioned_extension = release / "pi-task-extension.ts"
+    has_versioned_extension = (Path(exe).parent.name == ".bin" and Path(exe).parent.parent.name == "node_modules"
+                               and versioned_extension.is_file()
+                               and versioned_extension.resolve().is_relative_to(release.resolve()))
+    extension = env.get("PI_TASK_EXTENSION") or (str(versioned_extension) if has_versioned_extension else
+                str(Path(os.path.realpath(__file__)).with_name("pi-task-extension.ts")))
+    if not m:
+        print(f"{PROG}: cannot start pi: no session {name}", file=sys.stderr)
+        return 127
+    prompt = DELEGATED_PROMPT.format(name=name)
+    if m.get("append_system_prompt"):
+        prompt += "\n\n" + m["append_system_prompt"]
+    args = [exe, "--session-id", m["pi_session_id"], "--name", name, "--model", f"{m['provider']}/{m['model']}",
+            "--thinking", m["thinking"], "-e", extension, "--append-system-prompt", prompt,
+            "--approve" if trusted(m["cwd"]) else "--no-approve", *m.get("pi_args", [])]
+    # The extension asks this script for a Qwen slot before each run (`pi-task _slot`).
+    env.update(PI_TASK_DIR=str(sess.dir), PI_TASK_NAME=name, PI_TASK_CLI=os.path.realpath(__file__),
+               PI_TASK_PYTHON=sys.executable)
+    try:
+        os.chdir(m["cwd"])
+        os.execvpe(exe, args, env)
+    except OSError as e:
+        print(f"{PROG}: cannot start pi ({exe}) in {m['cwd']}: {e}", file=sys.stderr)
+        return 127
+
+
+# ---------------------------------------------------------------- arguments
+
+def build_parser():
+    """The top-level parser, and each command's own parser by name and alias."""
+    p = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
+    commands = {}
+
+    def command(name, func, help_, aliases=()):
+        sp = sub.add_parser(name, help=help_, description=help_, aliases=list(aliases))
+        sp.set_defaults(func=func)
+        for n in (name, *aliases):
+            commands[n] = sp
+        return sp
+
+    def settings_opts(sp, new):
+        dflt = (lambda v: f" (default: {v})") if new else (lambda v: "")
+        sp.add_argument("-m", "--model", help="provider/id, an ID, or a unique part of one, from ~/.pi/agent/models.json"
+                                              + dflt("the served one of: qwen3.8-flash-next, PI_TASK_MODEL, pi's default, any Qwen"))
+        sp.add_argument("-e", "--thinking", "--effort", dest="thinking", metavar="LEVEL",
+                        help="off, minimal, low, medium, high, xhigh or max, as the model maps them"
+                             + dflt("the highest the model maps"))
+
+    def wait_opts(sp):
+        sp.add_argument("--bg", action="store_true", help="queue it and return at once")
+        sp.add_argument("--timeout", type=float, metavar="SEC",
+                        help="stop waiting after SEC seconds and exit 3; the session keeps working")
+        sp.add_argument("-v", "--verbose", action="store_true", help="show pi's steps on stderr while waiting")
+        sp.add_argument("-q", "--quiet", action="store_true", help="no status lines on stderr")
+        sp.add_argument("--json", action="store_true", help="print the outcome as one JSON object")
+
+    def text_opts(sp, what):
+        sp.add_argument("text", nargs="*", metavar=what.upper(), help=f"the {what} (else -f FILE or stdin)")
+        sp.add_argument("-f", "--file", help=f"read the {what} from FILE ('-' means stdin)")
+
+    sp = command("new", cmd_new, "start a session, wait and print the answer")
+    sp.add_argument("-n", "--name", help="session name (default: from the prompt's first words)")
+    sp.add_argument("-C", "--cwd", metavar="DIR", help="directory to work in (default: the current one)")
+    settings_opts(sp, True)
+    sp.add_argument("--hidden", action="store_true", help="open no window; `pi-task show NAME` opens one later")
+    sp.add_argument("--window", action="store_true", help="open a window even when PI_TASK_HIDDEN=1")
+    sp.add_argument("--prepare", action="store_true", help="open idle with the prompt as persistent context; send no message and return immediately")
+    sp.add_argument("--append-system-prompt", metavar="TEXT", help="extra system prompt text")
+    sp.add_argument("--pi-args", metavar="ARGS", help="more pi CLI flags, as one shell-quoted string")
+    text_opts(sp, "prompt")
+    wait_opts(sp)
+
+    sp = command("send", cmd_send, "send a follow-up and wait for the answer")
+    sp.add_argument("session", metavar="NAME")
+    settings_opts(sp, False)
+    sp.add_argument("-i", "--interrupt", action="store_true", help="interrupt the current run first, like Esc")
+    sp.add_argument("--after", action="store_true",
+                    help="while pi works, deliver it when pi has finished (a follow-up), not after the "
+                         "current tool calls (a steer)")
+    text_opts(sp, "message")
+    wait_opts(sp)
+
+    sp = command("wait", cmd_wait, "wait until the session is idle; print the answer to the last message")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("--timeout", type=float, metavar="SEC", help="stop waiting after SEC seconds and exit 3")
+    sp.add_argument("-v", "--verbose", action="store_true", help="show pi's steps on stderr while waiting")
+    sp.add_argument("-q", "--quiet", action="store_true", help="no status lines on stderr")
+    sp.add_argument("--json", action="store_true", help="print the outcome as one JSON object")
+
+    sp = command("wait-many", cmd_wait_many, "observe frozen last messages; return early on failure (JSON output)")
+    sp.add_argument("sessions", nargs="+", metavar="NAME")
+    sp.add_argument("--timeout", type=float, required=True, metavar="SEC", help="group deadline in seconds; exit 3")
+    sp.add_argument("--json", action="store_true", help="accepted for explicitness; output is always JSON")
+    sp.add_argument("--reply-chars", type=int, default=1600, metavar="N", help="reply characters per target (0 to 8192; default 1600)")
+    sp.add_argument("--output", metavar="FILE", help="atomically create a private artifact with full replies and raw outcomes")
+
+    sp = command("result", cmd_result, "print the answer to the last message without waiting")
+    sp.add_argument("session", metavar="NAME")
+
+    sp = command("compact", cmd_compact, "compact the conversation; waits for the current run")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("text", nargs="*", metavar="FOCUS", help="what the summary should keep")
+    wait_opts(sp)
+
+    sp = command("set", cmd_set, "change model or thinking level; no options: show them")
+    sp.add_argument("session", metavar="NAME")
+    settings_opts(sp, False)
+
+    sp = command("interrupt", cmd_interrupt, "stop the current run, like Esc; the session stays usable")
+    sp.add_argument("session", metavar="NAME")
+
+    sp = command("stop", cmd_stop, "drop queued messages, end pi and close its windows; `send` starts it again")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("--force", action="store_true", help="kill pi at once")
+
+    sp = command("status", cmd_status, "show what a session is doing")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("--json", action="store_true")
+
+    sp = command("with-slot", cmd_with_slot, "run an external caller under the shared per-model cap and FIFO")
+    sp.add_argument("--model", required=True, metavar="MODEL", help="exact model ID used by this caller (no probe)")
+    sp.add_argument("--name", required=True, metavar="LABEL", help="display label; each invocation has a unique lease")
+    sp.add_argument("command", nargs=argparse.REMAINDER, metavar="-- COMMAND [ARG...]")
+
+    sp = command("list", cmd_list, "list sessions, most recently active first", aliases=["ls"])
+    sp.add_argument("-a", "--all", action="store_true", help="all sessions (default: the 20 latest)")
+    sp.add_argument("--json", action="store_true")
+
+    sp = command("log", cmd_log, "show the conversation from pi's session file: messages, answers, tool calls")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("-n", "--lines", type=int, default=40, help="show the last N lines (default 40; 0: all)")
+    sp.add_argument("-f", "--follow", action="store_true", help="keep printing new lines")
+    sp.add_argument("--full", action="store_true", help="untruncated text, with tool results")
+
+    sp = command("show", cmd_show, "open a gnome-terminal window on the session; starts pi if it is stopped")
+    sp.add_argument("session", metavar="NAME")
+    sp.add_argument("--new", action="store_true", help="open another window even if one is open")
+
+    sp = command("hide", cmd_hide, "close the session's windows; pi keeps running")
+    sp.add_argument("session", metavar="NAME")
+
+    sp = command("attach", cmd_attach, "watch and type in this terminal (tmux attach); starts pi if it is stopped")
+    sp.add_argument("session", metavar="NAME")
+
+    sp = command("cap", cmd_cap, "show each model's cap and use, shared by every caller; N sets the default "
+                                 "cap, or MODEL's own cap with -m")
+    sp.add_argument("cap", nargs="?", type=int, metavar="N", help=f"sessions in use per model (default {DEFAULT_CAP})")
+    sp.add_argument("-m", "--model", metavar="MODEL", help="model ID or provider/ID; show or set its own cap")
+    sp.add_argument("--json", action="store_true")
+
+    sp = command("models", cmd_models, "list what the configured providers serve now, and what new would pick")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--wait", action="store_true",
+                    help="keep probing until a Qwen model is served, then print and exit 0")
+    sp.add_argument("--interval", type=float, metavar="SEC",
+                    help="with --wait: probe every SEC seconds (default 60)")
+    sp.add_argument("--timeout", type=float, metavar="SEC",
+                    help="with --wait: give up after SEC seconds and exit 4 (default: wait forever)")
+
+    sp = command("rm", cmd_rm, "forget sessions (pi's own session files stay)")
+    sp.add_argument("sessions", nargs="+", metavar="NAME")
+    sp.add_argument("--force", action="store_true", help="kill running sessions first")
+
+    sp = command("recover", cmd_recover, "restart the sessions a crash or reboot cut: those that were working "
+                                         "or had queued messages and have no pi now")
+    sp.add_argument("sessions", nargs="*", metavar="NAME", help="only these sessions (default: all)")
+    sp.add_argument("--dry-run", action="store_true", help="list them, start nothing")
+    return p, commands
+
+
+def main():
+    if sys.argv[1:2] == ["_exec"]:
+        return cmd_exec(sys.argv[2])
+    if sys.argv[1:2] == ["_slot"]:
+        return cmd_slot(sys.argv[2:])
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    parser, commands = build_parser()
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        parser.print_help()
+        return 0
+    if argv[0] not in commands:
+        parser.error(f"unknown command {argv[0]!r}")
+    # Parsing each command on its own lets options follow the text: send NAME "..." --bg
+    parse = commands[argv[0]].parse_args if argv[0] == "with-slot" else commands[argv[0]].parse_intermixed_args
+    a = parse(argv[1:])
+    try:
+        return a.func(a)
+    except OSError as e:
+        if e.errno not in WRITE_BLOCKED or not e.filename:
+            raise
+        hint = (" The Codex sandbox blocks this: run the same pi-task command with escalated permissions."
+                if caller() == "codex" else "")
+        die(f"cannot write {e.filename}: {e.strerror}.{hint}")
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
